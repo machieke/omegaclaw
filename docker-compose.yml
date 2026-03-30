@@ -1,11 +1,33 @@
 services:
+  ollama:
+    image: ollama/ollama:latest
+    restart: unless-stopped
+    init: true
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
+    volumes:
+      - ollama-data:/root/.ollama:rw
+    networks:
+      - appnet
+
   mettaclaw:
     build:
       context: .
       dockerfile: Dockerfile
     image: mettaclaw:secure
+    depends_on:
+      ollama:
+        condition: service_healthy
     environment:
-      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-ollama-local}
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://ollama:11434}
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-llama3.2:1b}
+      OLLAMA_EMBED_MODEL: ${OLLAMA_EMBED_MODEL:-nomic-embed-text}
+      OLLAMA_AUTO_PULL: ${OLLAMA_AUTO_PULL:-true}
     user: "65534:65534"
     security_opt:
       - no-new-privileges:true
@@ -24,3 +46,6 @@ services:
 networks:
   appnet:
     driver: bridge
+
+volumes:
+  ollama-data:

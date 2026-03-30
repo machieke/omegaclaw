@@ -42,7 +42,10 @@ Run the system via the following command which ensures the system is started fro
 
 ```
 cp repos/mettaclaw/run.metta ./
-OPENAI_API_KEY=... sh run.sh run.metta
+OLLAMA_BASE_URL=http://127.0.0.1:11434 \
+OLLAMA_MODEL=llama3.2:1b \
+OLLAMA_EMBED_MODEL=nomic-embed-text \
+sh run.sh run.metta
 ```
 
 **Docker (Hardened Multi-Stage + Docker-Native Networking)**
@@ -50,7 +53,7 @@ OPENAI_API_KEY=... sh run.sh run.metta
 Build and run with Docker Compose:
 
 ```
-OPENAI_API_KEY=... docker compose up --build
+docker compose up --build
 ```
 
 Security-focused defaults now included:
@@ -64,9 +67,16 @@ Security-focused defaults now included:
 - Persistent writable mount only for `./memory`
 - User-defined bridge network (`appnet`) without published ports by default
 
+Default local-LLM wiring:
+- `ollama` sidecar service is started in the same Compose project
+- `OLLAMA_BASE_URL=http://ollama:11434`
+- `OLLAMA_MODEL=llama3.2:1b`
+- `OLLAMA_EMBED_MODEL=nomic-embed-text`
+- `OLLAMA_AUTO_PULL=true` (auto-pulls missing local models)
+
 **Auto-install/run**
 
-Alternatively, if PeTTa is already installed and the latest version pulled (v1.0.2 or latest commit), then, running the following MeTTa file from the root folder, installs and runs MeTTaClaw (assuming OPENAI_API_KEY is set):
+Alternatively, if PeTTa is already installed and the latest version pulled (v1.0.2 or latest commit), then running the following MeTTa file from the root folder installs and runs MeTTaClaw (assuming a reachable Ollama instance):
 
 ```
 !(import! &self (library lib_import))
@@ -93,5 +103,3 @@ Shell output of the actual invocation of the generated MeTTa code:
 System also added it into its Atom Space storage (embedding vector omitted):
 
 <img width="379" height="69" alt="image" src="https://github.com/user-attachments/assets/6aa59deb-33b4-42b9-a535-ae153b4b7a18" />
-
-
