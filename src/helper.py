@@ -1,9 +1,13 @@
 import json
 import os
+import re
 import urllib.error
 import urllib.request
 
 _ENSURED_MODELS = set()
+_SKILL_CMD_RE = re.compile(
+    r"\(\s*(remember|query|pin|shell|read-file|write-file|append-file|send|search|metta)\b"
+)
 
 
 def balance_parentheses(s):
@@ -16,6 +20,22 @@ def balance_parentheses(s):
         right += 1
     core = s[left:len(s) - right if right else len(s)].strip()
     return f"(({core}))"
+
+
+def normalize_skill_output(s, max_send_chars=360):
+    text = str(s or "").strip()
+    if not text:
+        return '((send ""))'
+
+    # If the model already emitted one of the supported skill commands,
+    # keep it and just normalize parenthesis framing.
+    if _SKILL_CMD_RE.search(text):
+        return balance_parentheses(text)
+
+    plain = text.replace("\r\n", "\n").replace("\r", "\n")
+    if len(plain) > max_send_chars:
+        plain = plain[: max_send_chars - 3] + "..."
+    return f"((send {json.dumps(plain)}))"
 
 
 def _ollama_base_url():

@@ -47,7 +47,7 @@
                                        ($send (py-str ($prompt $lastmessage)))
                                        ($_ (println! (CHARS_SENT: (string_length $send) $send)))
                                        ($respi (useLocalLLM (LLM) (maxOutputToken) (reasoningMode) $send))
-                                       ($resp (py-call (helper.balance_parentheses $respi)))
+                                       ($resp (py-call (helper.normalize_skill_output $respi)))
                                        ($response (if (== "(" (first_char $resp)) $resp (progn (println! $resp) (repr (REMEMBER:OUTPUT_NOTHING_ELSE_THAN: ((skill arg) ...))))))
                                        ($sexpr (catch (sread $response)))
                                        ($_ (change-state! &error ()))
