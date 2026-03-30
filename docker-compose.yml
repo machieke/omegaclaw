@@ -28,7 +28,8 @@ services:
       OLLAMA_MODEL: ${OLLAMA_MODEL:-llama3.2:1b}
       OLLAMA_EMBED_MODEL: ${OLLAMA_EMBED_MODEL:-nomic-embed-text}
       OLLAMA_AUTO_PULL: ${OLLAMA_AUTO_PULL:-true}
-    user: "65534:65534"
+    # Run as non-root while matching host bind-mount ownership by default.
+    user: "${METTACLAW_UID:-1000}:${METTACLAW_GID:-1000}"
     security_opt:
       - no-new-privileges:true
     read_only: true

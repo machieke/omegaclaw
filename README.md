@@ -61,7 +61,7 @@ Security-focused defaults now included:
 - Reduced runtime packages compared to the old single-stage style
 - `.dockerignore` to reduce build-context leakage risk
 - No in-container iptables/firewall script at runtime
-- Process runs directly as non-root (`65534:65534`)
+- Process runs directly as non-root (host-mapped UID/GID by default: `1000:1000`)
 - `security_opt: [no-new-privileges:true]`
 - `read_only: true` with `tmpfs` mounts
 - Persistent writable mount only for `./memory`
@@ -73,6 +73,8 @@ Default local-LLM wiring:
 - `OLLAMA_MODEL=llama3.2:1b`
 - `OLLAMA_EMBED_MODEL=nomic-embed-text`
 - `OLLAMA_AUTO_PULL=true` (auto-pulls missing local models)
+- If your host UID/GID is not `1000:1000`, set:
+  `METTACLAW_UID=$(id -u) METTACLAW_GID=$(id -g) docker compose up --build`
 
 **Auto-install/run**
 
