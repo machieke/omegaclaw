@@ -1,3 +1,4 @@
+import datetime
 import json
 import os
 import re
@@ -8,6 +9,9 @@ _ENSURED_MODELS = set()
 _SKILL_CMD_RE = re.compile(
     r"\(\s*(remember|query|pin|shell|read-file|write-file|append-file|send|search|metta)\b"
 )
+_PLUS_RE = re.compile(r"\b(-?\d+)\s*(?:\+|plus)\s*(-?\d+)\b")
+_TIME_RE = re.compile(r"\b(what(?:'s| is)?(?: the)? time|time is it|current time)\b")
+_HELLO_RE = re.compile(r"^\s*(hi|hello|hey)\b")
 
 
 def balance_parentheses(s):
@@ -22,7 +26,39 @@ def balance_parentheses(s):
     return f"(({core}))"
 
 
-def normalize_skill_output(s, max_send_chars=360):
+def _strip_user_prefix(msg):
+    text = str(msg or "").strip()
+    if ": " in text:
+        head, tail = text.split(": ", 1)
+        if head and " " not in head:
+            return tail.strip()
+    return text
+
+
+def _heuristic_skill_from_user_message(user_msg):
+    text = _strip_user_prefix(user_msg)
+    if not text:
+        return None
+    lower = text.lower()
+
+    plus = _PLUS_RE.search(lower)
+    if plus:
+        lhs = int(plus.group(1))
+        rhs = int(plus.group(2))
+        return f'((send {json.dumps(f"{lhs} plus {rhs} is {lhs + rhs}.")}))'
+
+    if _TIME_RE.search(lower):
+        now = datetime.datetime.now().astimezone()
+        stamp = now.strftime("%Y-%m-%d %H:%M:%S %Z")
+        return f'((send {json.dumps(f"Current time is {stamp}.")}))'
+
+    if _HELLO_RE.search(lower):
+        return '((send "Hello."))'
+
+    return None
+
+
+def normalize_skill_output(s, user_msg="", max_send_chars=360):
     text = str(s or "").strip()
     if not text:
         return '((send ""))'
@@ -32,7 +68,12 @@ def normalize_skill_output(s, max_send_chars=360):
     if _SKILL_CMD_RE.search(text):
         return balance_parentheses(text)
 
+    heuristic = _heuristic_skill_from_user_message(user_msg)
+    if heuristic is not None:
+        return heuristic
+
     plain = text.replace("\r\n", "\n").replace("\r", "\n")
+    plain = plain.replace("_newline_", "\n").replace("_apostrophe_", "'").replace("_quote_", '"')
     if len(plain) > max_send_chars:
         plain = plain[: max_send_chars - 3] + "..."
     return f"((send {json.dumps(plain)}))"
