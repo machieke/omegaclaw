@@ -44,7 +44,7 @@
                                                  MESSAGE-IS-NEW: $msgnew))
                                   ($_ (if (== $msgnew true) (println! $lastmessage) _))
                                   ($send (if (== $msgnew true) (py-str ((getContext) $lastmessage)) ""))
-                                  ($_ (if (== $msgnew true) (println! (CHARS_SENT: (string_length $send) $send)) _))
+                                  ($_ _)
                                   ($_ (if (== $msgnew true) (py-call (irc.trace_llm_request)) _))
                                   ($respi (if (== $msgnew true)
                                               (useLocalLLMWithUser (LLM) (maxOutputToken) (reasoningMode) $send $msg)

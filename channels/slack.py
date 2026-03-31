@@ -1,5 +1,6 @@
 import threading
 import time
+import os
 
 import requests
 
@@ -181,9 +182,11 @@ def send_message(text):
 
 
 def get_config():
+    token = str(SLACK_BOT_TOKEN or os.getenv("SLACK_BOT_TOKEN", "")).strip()
+    channel_id = str(SLACK_CHANNEL_ID or os.getenv("SLACK_CHANNEL_ID", "")).strip()
     return {
         "running": bool(_running),
         "connected": bool(_connected),
-        "channel_id": str(SLACK_CHANNEL_ID or ""),
-        "bot_token_set": bool(str(SLACK_BOT_TOKEN or "").strip()),
+        "channel_id": channel_id,
+        "bot_token_set": bool(token),
     }

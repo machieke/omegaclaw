@@ -590,6 +590,111 @@ def _set_active_commchannel(name):
     return True
 
 
+def get_active_commchannel_name():
+    return _get_active_commchannel()
+
+
+def _backend_attr_or_env(backend, attr_name, env_name):
+    value = ""
+    if backend is not None:
+        try:
+            value = str(getattr(backend, attr_name, "") or "").strip()
+        except Exception:
+            value = ""
+    if not value:
+        value = str(os.getenv(env_name, "") or "").strip()
+    return value
+
+
+def _channel_has_config(channel):
+    target = _normalize_commchannel(channel)
+    if not target:
+        return False
+    if target == "irc":
+        return True
+    if target == "mattermost":
+        backend = _load_mattermost_backend()
+        mm_channel = _backend_attr_or_env(backend, "CHANNEL_ID", "MM_CHANNEL_ID")
+        mm_token = _backend_attr_or_env(backend, "BOT_TOKEN", "MM_BOT_TOKEN")
+        return bool(mm_channel and mm_token)
+    if target == "telegram":
+        backend = _load_telegram_backend()
+        token = _backend_attr_or_env(backend, "TG_BOT_TOKEN", "TG_BOT_TOKEN")
+        chat_id = _backend_attr_or_env(backend, "TG_CHAT_ID", "TG_CHAT_ID")
+        return bool(token and chat_id)
+    if target == "discord":
+        backend = _load_discord_backend()
+        token = _backend_attr_or_env(backend, "DISCORD_BOT_TOKEN", "DISCORD_BOT_TOKEN")
+        channel_id = _backend_attr_or_env(backend, "DISCORD_CHANNEL_ID", "DISCORD_CHANNEL_ID")
+        return bool(token and channel_id)
+    if target == "slack":
+        backend = _load_slack_backend()
+        token = _backend_attr_or_env(backend, "SLACK_BOT_TOKEN", "SLACK_BOT_TOKEN")
+        channel_id = _backend_attr_or_env(backend, "SLACK_CHANNEL_ID", "SLACK_CHANNEL_ID")
+        return bool(token and channel_id)
+    return False
+
+
+def init_channel_runtime(default_channel="irc"):
+    requested = _normalize_commchannel(default_channel)
+    if not requested:
+        requested = _normalize_commchannel(os.getenv("METTACLAW_COMMCHANNEL", "irc"))
+    if not requested:
+        requested = "irc"
+    _set_active_commchannel(requested)
+
+    started = {}
+    for channel in _SUPPORTED_COMMCHANNELS:
+        if channel != "irc" and not _channel_has_config(channel):
+            continue
+        started[channel] = bool(_ensure_backend_started(channel))
+
+    if not started.get(requested, False):
+        _set_active_commchannel("irc")
+        _ensure_backend_started("irc")
+    return _get_active_commchannel()
+
+
+def _receive_from_channel(channel):
+    target = _normalize_commchannel(channel)
+    if not target:
+        return ""
+    if target == "irc":
+        backend = _load_irc_backend()
+    elif target == "mattermost":
+        backend = _load_mattermost_backend()
+    elif target == "telegram":
+        backend = _load_telegram_backend()
+    elif target == "discord":
+        backend = _load_discord_backend()
+    elif target == "slack":
+        backend = _load_slack_backend()
+    else:
+        backend = None
+    if backend is None or not hasattr(backend, "getLastMessage"):
+        return ""
+    try:
+        msg = str(backend.getLastMessage() or "")
+    except Exception:
+        return ""
+    return msg.strip()
+
+
+def receive_latest_message():
+    active = _get_active_commchannel()
+    order = [active] + [channel for channel in _SUPPORTED_COMMCHANNELS if channel != active]
+    for channel in order:
+        msg = _receive_from_channel(channel)
+        if msg:
+            _set_active_commchannel(channel)
+            return msg
+    return ""
+
+
+def send_message_to_active(text):
+    return bool(_dispatch_text_to_channels(text))
+
+
 def _int_or_default(value, default):
     try:
         return int(str(value))
@@ -609,10 +714,13 @@ def _ensure_backend_started(channel):
         connected = bool(backend.is_connected()) if hasattr(backend, "is_connected") else False
         if running or connected:
             return True
-        irc_channel = str(getattr(backend, "_channel", "") or os.getenv("IRC_CHANNEL", "#purpleclaw")).strip()
-        server = str(getattr(backend, "_server", "") or os.getenv("IRC_SERVER", "irc.quakenet.org")).strip()
-        port = _int_or_default(getattr(backend, "_port", ""), _int_or_default(os.getenv("IRC_PORT", 6667), 6667))
-        nick = str(getattr(backend, "_nick", "") or os.getenv("IRC_USER", "purpleclaw")).strip()
+        irc_channel = str(os.getenv("IRC_CHANNEL", "") or getattr(backend, "_channel", "") or "#purpleclaw").strip()
+        server = str(os.getenv("IRC_SERVER", "") or getattr(backend, "_server", "") or "irc.quakenet.org").strip()
+        port = _int_or_default(
+            os.getenv("IRC_PORT", ""),
+            _int_or_default(getattr(backend, "_port", ""), 6667),
+        )
+        nick = str(os.getenv("IRC_USER", "") or getattr(backend, "_nick", "") or "purpleclaw").strip()
         if not irc_channel:
             irc_channel = "#purpleclaw"
         if not server:
@@ -632,9 +740,9 @@ def _ensure_backend_started(channel):
         connected = bool(backend.is_connected()) if hasattr(backend, "is_connected") else False
         if running or connected:
             return True
-        mm_url = str(getattr(backend, "MM_URL", "") or os.getenv("MM_URL", "https://chat.singularitynet.io")).strip()
-        mm_channel = str(getattr(backend, "CHANNEL_ID", "") or os.getenv("MM_CHANNEL_ID", "")).strip()
-        mm_token = str(getattr(backend, "BOT_TOKEN", "") or os.getenv("MM_BOT_TOKEN", "")).strip()
+        mm_url = str(os.getenv("MM_URL", "") or getattr(backend, "MM_URL", "") or "https://chat.singularitynet.io").strip()
+        mm_channel = str(os.getenv("MM_CHANNEL_ID", "") or getattr(backend, "CHANNEL_ID", "")).strip()
+        mm_token = str(os.getenv("MM_BOT_TOKEN", "") or getattr(backend, "BOT_TOKEN", "")).strip()
         try:
             backend.start_mattermost(mm_url, mm_channel, mm_token)
             return True
@@ -648,8 +756,8 @@ def _ensure_backend_started(channel):
         connected = bool(backend.is_connected()) if hasattr(backend, "is_connected") else False
         if running or connected:
             return True
-        token = str(getattr(backend, "TG_BOT_TOKEN", "") or os.getenv("TG_BOT_TOKEN", "")).strip()
-        chat_id = str(getattr(backend, "TG_CHAT_ID", "") or os.getenv("TG_CHAT_ID", "")).strip()
+        token = str(os.getenv("TG_BOT_TOKEN", "") or getattr(backend, "TG_BOT_TOKEN", "")).strip()
+        chat_id = str(os.getenv("TG_CHAT_ID", "") or getattr(backend, "TG_CHAT_ID", "")).strip()
         try:
             backend.start_telegram(token, chat_id)
             return True
@@ -663,8 +771,8 @@ def _ensure_backend_started(channel):
         connected = bool(backend.is_connected()) if hasattr(backend, "is_connected") else False
         if running or connected:
             return True
-        token = str(getattr(backend, "DISCORD_BOT_TOKEN", "") or os.getenv("DISCORD_BOT_TOKEN", "")).strip()
-        channel_id = str(getattr(backend, "DISCORD_CHANNEL_ID", "") or os.getenv("DISCORD_CHANNEL_ID", "")).strip()
+        token = str(os.getenv("DISCORD_BOT_TOKEN", "") or getattr(backend, "DISCORD_BOT_TOKEN", "")).strip()
+        channel_id = str(os.getenv("DISCORD_CHANNEL_ID", "") or getattr(backend, "DISCORD_CHANNEL_ID", "")).strip()
         try:
             backend.start_discord(token, channel_id)
             return True
@@ -678,8 +786,8 @@ def _ensure_backend_started(channel):
         connected = bool(backend.is_connected()) if hasattr(backend, "is_connected") else False
         if running or connected:
             return True
-        token = str(getattr(backend, "SLACK_BOT_TOKEN", "") or os.getenv("SLACK_BOT_TOKEN", "")).strip()
-        channel_id = str(getattr(backend, "SLACK_CHANNEL_ID", "") or os.getenv("SLACK_CHANNEL_ID", "")).strip()
+        token = str(os.getenv("SLACK_BOT_TOKEN", "") or getattr(backend, "SLACK_BOT_TOKEN", "")).strip()
+        channel_id = str(os.getenv("SLACK_CHANNEL_ID", "") or getattr(backend, "SLACK_CHANNEL_ID", "")).strip()
         try:
             backend.start_slack(token, channel_id)
             return True

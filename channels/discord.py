@@ -1,5 +1,6 @@
 import threading
 import time
+import os
 
 import requests
 
@@ -136,9 +137,11 @@ def send_message(text):
 
 
 def get_config():
+    token = str(DISCORD_BOT_TOKEN or os.getenv("DISCORD_BOT_TOKEN", "")).strip()
+    channel_id = str(DISCORD_CHANNEL_ID or os.getenv("DISCORD_CHANNEL_ID", "")).strip()
     return {
         "running": bool(_running),
         "connected": bool(_connected),
-        "channel_id": str(DISCORD_CHANNEL_ID or ""),
-        "bot_token_set": bool(str(DISCORD_BOT_TOKEN or "").strip()),
+        "channel_id": channel_id,
+        "bot_token_set": bool(token),
     }

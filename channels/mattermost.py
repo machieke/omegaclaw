@@ -1,4 +1,4 @@
-import threading, json
+import threading, json, os
 import requests, websocket
 import time
 
@@ -119,10 +119,13 @@ def send_message(text):
 
 
 def get_config():
+    url = str(MM_URL or os.getenv("MM_URL", "")).strip()
+    channel_id = str(CHANNEL_ID or os.getenv("MM_CHANNEL_ID", "")).strip()
+    token = str(BOT_TOKEN or os.getenv("MM_BOT_TOKEN", "")).strip()
     return {
         "running": bool(_running),
         "connected": bool(_connected),
-        "url": str(MM_URL or ""),
-        "channel_id": str(CHANNEL_ID or ""),
-        "bot_token_set": bool(str(BOT_TOKEN or "").strip()),
+        "url": url,
+        "channel_id": channel_id,
+        "bot_token_set": bool(token),
     }
