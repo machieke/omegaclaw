@@ -45,12 +45,25 @@ _LONG_FORM_REQUEST_RE = re.compile(
 _CREATIVE_REQUEST_RE = re.compile(r"\b(joke|story|poem|riddle|haiku|funny)\b", re.IGNORECASE)
 _EXPLICIT_SEARCH_RE = re.compile(r"^\s*(search(?:\s+for)?|look\s+up)\b", re.IGNORECASE)
 _LIVE_LOOKUP_RE = re.compile(r"\b(weather|temperature|forecast|right now|today|latest|current)\b", re.IGNORECASE)
+_USE_MODEL_RE = re.compile(r"^\s*use\s+model\s+(.+?)\s*$", re.IGNORECASE)
+_CURRENT_MODEL_RE = re.compile(
+    r"^\s*(?:which|what)\s+(?:is\s+)?(?:the\s+)?(?:current|active)\s+model\??\s*$"
+    r"|^\s*(?:which|what)\s+model\s+(?:are\s+you\s+using|is\s+active)\??\s*$"
+    r"|^\s*(?:current|active)\s+model\??\s*$",
+    re.IGNORECASE,
+)
+_MODEL_LIST_RE = re.compile(
+    r"(?:\b(?:list|show)\s+(?:ollama\s+)?models?\b|\bollama\s+list\b|\bwhat\s+models?\b)",
+    re.IGNORECASE,
+)
 _SEARCH_RESULT_ITEM_RE = re.compile(r"\(TITLE:\s*(.*?)\s+SNIPPET:\s*(.*?)\)\s*", re.DOTALL)
 _ASYNC_DISPATCH_LOCK = threading.Lock()
 _ASYNC_DISPATCH_EXECUTOR = None
 _ASYNC_DISPATCH_WORKERS = 0
 _SENDER_LOCKS_LOCK = threading.Lock()
 _SENDER_LOCKS = {}
+_ACTIVE_CHAT_MODEL_LOCK = threading.Lock()
+_ACTIVE_CHAT_MODEL = ""
 
 
 def _balanced_parentheses(text):
@@ -437,6 +450,137 @@ def _search_query_from_message(msg):
     return None
 
 
+def _available_model_names():
+    try:
+        tags = _get_json("/api/tags")
+    except Exception:
+        return []
+    raw_models = tags.get("models")
+    names = []
+    if isinstance(raw_models, list):
+        for item in raw_models:
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("name") or "").strip()
+            if name:
+                names.append(name)
+    return names
+
+
+def _model_base_name(model_name):
+    return str(model_name or "").strip().lower().split(":", 1)[0]
+
+
+def _resolve_requested_model(requested, names):
+    req = str(requested or "").strip().lower()
+    if not req or not names:
+        return ""
+    for name in names:
+        if name.lower() == req:
+            return name
+    for name in names:
+        if _model_base_name(name) == req:
+            return name
+    prefix_matches = []
+    for name in names:
+        full = name.lower()
+        base = _model_base_name(name)
+        if full.startswith(req) or base.startswith(req):
+            prefix_matches.append(name)
+    if prefix_matches:
+        prefix_matches.sort(key=len)
+        return prefix_matches[0]
+    contains_matches = []
+    for name in names:
+        full = name.lower()
+        base = _model_base_name(name)
+        if req in full or req in base:
+            contains_matches.append(name)
+    if contains_matches:
+        contains_matches.sort(key=len)
+        return contains_matches[0]
+    return ""
+
+
+def _active_chat_model_default(model_hint=""):
+    env_model = str(os.getenv("OLLAMA_MODEL", "") or "").strip()
+    hint = str(model_hint or "").strip()
+    return env_model or hint or "llama3.1:8b"
+
+
+def _get_active_chat_model(model_hint=""):
+    global _ACTIVE_CHAT_MODEL
+    with _ACTIVE_CHAT_MODEL_LOCK:
+        if not _ACTIVE_CHAT_MODEL:
+            _ACTIVE_CHAT_MODEL = _active_chat_model_default(model_hint)
+        return _ACTIVE_CHAT_MODEL
+
+
+def _set_active_chat_model(model_name):
+    global _ACTIVE_CHAT_MODEL
+    chosen = str(model_name or "").strip()
+    if not chosen:
+        return
+    with _ACTIVE_CHAT_MODEL_LOCK:
+        _ACTIVE_CHAT_MODEL = chosen
+
+
+def _model_control_skill_from_user_message(user_msg, max_send_chars):
+    replies = []
+    names = []
+    for part in _extract_user_parts(user_msg):
+        msg = _decode_special_tokens(_strip_user_prefix(part)).strip()
+        if not msg:
+            continue
+        use_match = _USE_MODEL_RE.match(msg)
+        if use_match:
+            requested = use_match.group(1).strip().strip('"').strip("'").rstrip(".!?")
+            if not names:
+                names = _available_model_names()
+            resolved = _resolve_requested_model(requested, names)
+            if resolved:
+                _set_active_chat_model(resolved)
+                replies.append(_shorten_text(f"Using model {resolved}.", max_send_chars))
+            else:
+                if names:
+                    preview = ", ".join(names[:8])
+                    reply = f"Model '{requested}' not found. Available: {preview}"
+                else:
+                    reply = f"Model '{requested}' not found, and I couldn't fetch the Ollama model list."
+                replies.append(_shorten_text(reply, max_send_chars))
+            continue
+        if _CURRENT_MODEL_RE.match(msg):
+            current = _get_active_chat_model("")
+            replies.append(_shorten_text(f"Current model is {current}.", max_send_chars))
+    if not replies:
+        return None
+    cmds = " ".join(f"(send {json.dumps(reply)})" for reply in replies[:3])
+    return f"({cmds})"
+
+
+def _model_list_skill_from_user_message(user_msg, max_send_chars):
+    replies = []
+    for part in _extract_user_parts(user_msg):
+        msg = _trim_user_text(_strip_user_prefix(part))
+        if not _MODEL_LIST_RE.search(msg):
+            continue
+        try:
+            names = _available_model_names()
+            if names:
+                reply = "Available models: " + ", ".join(names)
+            else:
+                reply = "No models are currently available in Ollama."
+        except Exception:
+            reply = "I couldn't list Ollama models right now."
+        replies.append(_shorten_text(reply, max_send_chars))
+        if len(replies) >= 3:
+            break
+    if not replies:
+        return None
+    cmds = " ".join(f"(send {json.dumps(reply)})" for reply in replies)
+    return f"({cmds})"
+
+
 def _search_items(raw):
     text = str(raw or "")
     items = []
@@ -478,6 +622,12 @@ def _best_search_snippet(query, raw):
 
 
 def _tool_skill_from_user_message(user_msg, max_send_chars):
+    model_control = _model_control_skill_from_user_message(user_msg, max_send_chars)
+    if model_control is not None:
+        return model_control
+    model_list = _model_list_skill_from_user_message(user_msg, max_send_chars)
+    if model_list is not None:
+        return model_list
     backend = _load_websearch_backend()
     if backend is None:
         return None
@@ -1345,8 +1495,7 @@ def generate_skill_candidate(model, prompt, max_tokens, effort, user_msg=""):
 
 def ollama_chat(model, prompt, max_tokens, effort):
     _start_background_prewarm()
-    env_model = os.getenv("OLLAMA_MODEL", "").strip()
-    chosen_model = env_model or str(model or "").strip() or "llama3.1:8b"
+    chosen_model = _get_active_chat_model(model)
     _ensure_ollama_model(chosen_model)
     _prewarm_chat_model(chosen_model)
     think = _ollama_think(effort)

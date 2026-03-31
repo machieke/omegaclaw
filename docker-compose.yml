@@ -25,7 +25,7 @@ services:
     environment:
       OPENAI_API_KEY: ${OPENAI_API_KEY:-ollama-local}
       OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://ollama:11434}
-      OLLAMA_MODEL: ${OLLAMA_MODEL:-aiasistentworld/Llama-3.1-8B-Instruct-STO-Master:latest}
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-qwen3-coder-next:latest}
       OLLAMA_EMBED_MODEL: ${OLLAMA_EMBED_MODEL:-nomic-embed-text}
       OLLAMA_AUTO_PULL: ${OLLAMA_AUTO_PULL:-true}
       OLLAMA_KEEP_ALIVE: ${OLLAMA_KEEP_ALIVE:--1}
