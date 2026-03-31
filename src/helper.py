@@ -28,6 +28,8 @@ def balance_parentheses(s):
 
 def _strip_user_prefix(msg):
     text = str(msg or "").strip()
+    if " | " in text:
+        text = text.split(" | ")[-1].strip()
     if ": " in text:
         head, tail = text.split(": ", 1)
         if head and " " not in head:
