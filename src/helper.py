@@ -60,10 +60,19 @@ def _heuristic_skill_from_user_message(user_msg):
     return None
 
 
-def normalize_skill_output(s, user_msg="", max_send_chars=360):
+def _is_true(value):
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def normalize_skill_output(s, user_msg="", msg_new=False, max_send_chars=360):
     text = str(s or "").strip()
     if not text:
-        return '((send ""))'
+        return "()"
+
+    if not _is_true(msg_new):
+        return "()"
 
     # If the model already emitted one of the supported skill commands,
     # keep it and just normalize parenthesis framing.
