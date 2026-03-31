@@ -58,6 +58,27 @@ _MODEL_LIST_RE = re.compile(
     r"(?:\b(?:list|show)\s+(?:ollama\s+)?models?\b|\bollama\s+list\b|\bwhat\s+models?\b)",
     re.IGNORECASE,
 )
+_CHANNEL_LIST_RE = re.compile(
+    r"^\s*(?:list|show)\s+channels?\s*\??\s*$"
+    r"|^\s*(?:which|what)\s+channels?\s+(?:are\s+)?(?:available|supported)\s*\??\s*$",
+    re.IGNORECASE,
+)
+_SHOW_IRC_CONFIG_RE = re.compile(r"^\s*show\s+irc\s+channel\s+config\s*\??\s*$", re.IGNORECASE)
+_SHOW_MM_CONFIG_RE = re.compile(
+    r"^\s*show\s+mattermost\s+channel\s+config\s*\??\s*$",
+    re.IGNORECASE,
+)
+_SHOW_TG_CONFIG_RE = re.compile(r"^\s*show\s+telegram\s+channel\s+config\s*\??\s*$", re.IGNORECASE)
+_SHOW_DISCORD_CONFIG_RE = re.compile(r"^\s*show\s+discord\s+channel\s+config\s*\??\s*$", re.IGNORECASE)
+_SHOW_SLACK_CONFIG_RE = re.compile(r"^\s*show\s+slack\s+channel\s+config\s*\??\s*$", re.IGNORECASE)
+_SHOW_CURRENT_CHANNEL_RE = re.compile(
+    r"^\s*(?:show|what(?:\s+is)?)\s+(?:the\s+)?current\s+channel\s*\??\s*$",
+    re.IGNORECASE,
+)
+_USE_CHANNEL_RE = re.compile(
+    r"^\s*use\s+(irc|mattermost|telegram|discord|slack)\s+channel\s*\??\s*$",
+    re.IGNORECASE,
+)
 _SEARCH_RESULT_ITEM_RE = re.compile(r"\(TITLE:\s*(.*?)\s+SNIPPET:\s*(.*?)\)\s*", re.DOTALL)
 _ASYNC_DISPATCH_LOCK = threading.Lock()
 _ASYNC_DISPATCH_EXECUTOR = None
@@ -66,6 +87,9 @@ _SENDER_LOCKS_LOCK = threading.Lock()
 _SENDER_LOCKS = {}
 _ACTIVE_CHAT_MODEL_LOCK = threading.Lock()
 _ACTIVE_CHAT_MODEL = ""
+_SUPPORTED_COMMCHANNELS = ("irc", "mattermost", "telegram", "discord", "slack")
+_ACTIVE_COMMCHANNEL_LOCK = threading.Lock()
+_ACTIVE_COMMCHANNEL = str(os.getenv("METTACLAW_COMMCHANNEL", "irc") or "").strip().lower()
 
 
 def _balanced_parentheses(text):
@@ -430,6 +454,18 @@ def _load_mattermost_backend():
     return _load_channel_backend("mattermost")
 
 
+def _load_telegram_backend():
+    return _load_channel_backend("telegram")
+
+
+def _load_discord_backend():
+    return _load_channel_backend("discord")
+
+
+def _load_slack_backend():
+    return _load_channel_backend("slack")
+
+
 def _search_query_from_message(msg):
     text = str(msg or "").strip()
     if not text:
@@ -525,6 +561,131 @@ def _set_active_chat_model(model_name):
         return
     with _ACTIVE_CHAT_MODEL_LOCK:
         _ACTIVE_CHAT_MODEL = chosen
+
+
+def _normalize_commchannel(name):
+    channel = str(name or "").strip().lower()
+    if channel in _SUPPORTED_COMMCHANNELS:
+        return channel
+    return ""
+
+
+def _get_active_commchannel():
+    global _ACTIVE_COMMCHANNEL
+    with _ACTIVE_COMMCHANNEL_LOCK:
+        normalized = _normalize_commchannel(_ACTIVE_COMMCHANNEL)
+        if not normalized:
+            normalized = "irc"
+            _ACTIVE_COMMCHANNEL = normalized
+        return normalized
+
+
+def _set_active_commchannel(name):
+    global _ACTIVE_COMMCHANNEL
+    normalized = _normalize_commchannel(name)
+    if not normalized:
+        return False
+    with _ACTIVE_COMMCHANNEL_LOCK:
+        _ACTIVE_COMMCHANNEL = normalized
+    return True
+
+
+def _int_or_default(value, default):
+    try:
+        return int(str(value))
+    except Exception:
+        return default
+
+
+def _ensure_backend_started(channel):
+    target = _normalize_commchannel(channel)
+    if not target:
+        return False
+    if target == "irc":
+        backend = _load_irc_backend()
+        if backend is None or not hasattr(backend, "start_irc"):
+            return False
+        running = bool(getattr(backend, "_running", False))
+        connected = bool(backend.is_connected()) if hasattr(backend, "is_connected") else False
+        if running or connected:
+            return True
+        irc_channel = str(getattr(backend, "_channel", "") or os.getenv("IRC_CHANNEL", "#purpleclaw")).strip()
+        server = str(getattr(backend, "_server", "") or os.getenv("IRC_SERVER", "irc.quakenet.org")).strip()
+        port = _int_or_default(getattr(backend, "_port", ""), _int_or_default(os.getenv("IRC_PORT", 6667), 6667))
+        nick = str(getattr(backend, "_nick", "") or os.getenv("IRC_USER", "purpleclaw")).strip()
+        if not irc_channel:
+            irc_channel = "#purpleclaw"
+        if not server:
+            server = "irc.quakenet.org"
+        if not nick:
+            nick = "purpleclaw"
+        try:
+            backend.start_irc(irc_channel, server, port, nick)
+            return True
+        except Exception:
+            return False
+    if target == "mattermost":
+        backend = _load_mattermost_backend()
+        if backend is None or not hasattr(backend, "start_mattermost"):
+            return False
+        running = bool(getattr(backend, "_running", False))
+        connected = bool(backend.is_connected()) if hasattr(backend, "is_connected") else False
+        if running or connected:
+            return True
+        mm_url = str(getattr(backend, "MM_URL", "") or os.getenv("MM_URL", "https://chat.singularitynet.io")).strip()
+        mm_channel = str(getattr(backend, "CHANNEL_ID", "") or os.getenv("MM_CHANNEL_ID", "")).strip()
+        mm_token = str(getattr(backend, "BOT_TOKEN", "") or os.getenv("MM_BOT_TOKEN", "")).strip()
+        try:
+            backend.start_mattermost(mm_url, mm_channel, mm_token)
+            return True
+        except Exception:
+            return False
+    if target == "telegram":
+        backend = _load_telegram_backend()
+        if backend is None or not hasattr(backend, "start_telegram"):
+            return False
+        running = bool(getattr(backend, "_running", False))
+        connected = bool(backend.is_connected()) if hasattr(backend, "is_connected") else False
+        if running or connected:
+            return True
+        token = str(getattr(backend, "TG_BOT_TOKEN", "") or os.getenv("TG_BOT_TOKEN", "")).strip()
+        chat_id = str(getattr(backend, "TG_CHAT_ID", "") or os.getenv("TG_CHAT_ID", "")).strip()
+        try:
+            backend.start_telegram(token, chat_id)
+            return True
+        except Exception:
+            return False
+    if target == "discord":
+        backend = _load_discord_backend()
+        if backend is None or not hasattr(backend, "start_discord"):
+            return False
+        running = bool(getattr(backend, "_running", False))
+        connected = bool(backend.is_connected()) if hasattr(backend, "is_connected") else False
+        if running or connected:
+            return True
+        token = str(getattr(backend, "DISCORD_BOT_TOKEN", "") or os.getenv("DISCORD_BOT_TOKEN", "")).strip()
+        channel_id = str(getattr(backend, "DISCORD_CHANNEL_ID", "") or os.getenv("DISCORD_CHANNEL_ID", "")).strip()
+        try:
+            backend.start_discord(token, channel_id)
+            return True
+        except Exception:
+            return False
+    if target == "slack":
+        backend = _load_slack_backend()
+        if backend is None or not hasattr(backend, "start_slack"):
+            return False
+        running = bool(getattr(backend, "_running", False))
+        connected = bool(backend.is_connected()) if hasattr(backend, "is_connected") else False
+        if running or connected:
+            return True
+        token = str(getattr(backend, "SLACK_BOT_TOKEN", "") or os.getenv("SLACK_BOT_TOKEN", "")).strip()
+        channel_id = str(getattr(backend, "SLACK_CHANNEL_ID", "") or os.getenv("SLACK_CHANNEL_ID", "")).strip()
+        try:
+            backend.start_slack(token, channel_id)
+            return True
+        except Exception:
+            return False
+    return False
 
 
 def _parse_join_channel_target(text):
@@ -677,6 +838,173 @@ def _model_list_skill_from_user_message(user_msg, max_send_chars):
     return f"({cmds})"
 
 
+def _channel_list_skill_from_user_message(user_msg, max_send_chars):
+    replies = []
+    for part in _extract_user_parts(user_msg):
+        msg = _decode_special_tokens(_strip_user_prefix(part)).strip()
+        if not _CHANNEL_LIST_RE.match(msg):
+            continue
+        replies.append(_shorten_text("Supported channels: irc, mattermost, telegram, discord, slack", max_send_chars))
+        if len(replies) >= 3:
+            break
+    if not replies:
+        return None
+    cmds = " ".join(f"(send {json.dumps(reply)})" for reply in replies)
+    return f"({cmds})"
+
+
+def _commchannel_skill_from_user_message(user_msg, max_send_chars):
+    replies = []
+    for part in _extract_user_parts(user_msg):
+        msg = _decode_special_tokens(_strip_user_prefix(part)).strip()
+        if _SHOW_CURRENT_CHANNEL_RE.match(msg):
+            current = _get_active_commchannel()
+            replies.append(_shorten_text(f"Current commchannel is {current}.", max_send_chars))
+        else:
+            use_match = _USE_CHANNEL_RE.match(msg)
+            if use_match:
+                target = _normalize_commchannel(use_match.group(1))
+                if target and _set_active_commchannel(target):
+                    _ensure_backend_started(target)
+                    replies.append(_shorten_text(f"Switched commchannel to {target}.", max_send_chars))
+                else:
+                    replies.append(_shorten_text("Unsupported channel.", max_send_chars))
+        if len(replies) >= 3:
+            break
+    if not replies:
+        return None
+    cmds = " ".join(f"(send {json.dumps(reply)})" for reply in replies)
+    return f"({cmds})"
+
+
+def _channel_config_skill_from_user_message(user_msg, max_send_chars):
+    replies = []
+    for part in _extract_user_parts(user_msg):
+        msg = _decode_special_tokens(_strip_user_prefix(part)).strip()
+        if _SHOW_IRC_CONFIG_RE.match(msg):
+            irc_backend = _load_irc_backend()
+            cfg = {}
+            if irc_backend is not None:
+                try:
+                    if hasattr(irc_backend, "get_config"):
+                        cfg = irc_backend.get_config() or {}
+                except Exception:
+                    cfg = {}
+            if not cfg:
+                cfg = {
+                    "server": "",
+                    "port": "",
+                    "nick": "",
+                    "channel": "",
+                    "connected": False,
+                }
+            reply = (
+                "IRC config: "
+                f"server={cfg.get('server', '')} "
+                f"port={cfg.get('port', '')} "
+                f"nick={cfg.get('nick', '')} "
+                f"channel={cfg.get('channel', '')} "
+                f"connected={bool(cfg.get('connected', False))}"
+            )
+            replies.append(_shorten_text(reply.strip(), max_send_chars))
+        elif _SHOW_MM_CONFIG_RE.match(msg):
+            mm_backend = _load_mattermost_backend()
+            cfg = {}
+            if mm_backend is not None:
+                try:
+                    if hasattr(mm_backend, "get_config"):
+                        cfg = mm_backend.get_config() or {}
+                except Exception:
+                    cfg = {}
+            if not cfg:
+                cfg = {
+                    "url": "",
+                    "channel_id": "",
+                    "bot_token_set": False,
+                    "connected": False,
+                }
+            reply = (
+                "Mattermost config: "
+                f"url={cfg.get('url', '')} "
+                f"channel_id={cfg.get('channel_id', '')} "
+                f"bot_token_set={bool(cfg.get('bot_token_set', False))} "
+                f"connected={bool(cfg.get('connected', False))}"
+            )
+            replies.append(_shorten_text(reply.strip(), max_send_chars))
+        elif _SHOW_TG_CONFIG_RE.match(msg):
+            tg_backend = _load_telegram_backend()
+            cfg = {}
+            if tg_backend is not None:
+                try:
+                    if hasattr(tg_backend, "get_config"):
+                        cfg = tg_backend.get_config() or {}
+                except Exception:
+                    cfg = {}
+            if not cfg:
+                cfg = {
+                    "chat_id": "",
+                    "bot_token_set": False,
+                    "connected": False,
+                }
+            reply = (
+                "Telegram config: "
+                f"chat_id={cfg.get('chat_id', '')} "
+                f"bot_token_set={bool(cfg.get('bot_token_set', False))} "
+                f"connected={bool(cfg.get('connected', False))}"
+            )
+            replies.append(_shorten_text(reply.strip(), max_send_chars))
+        elif _SHOW_DISCORD_CONFIG_RE.match(msg):
+            discord_backend = _load_discord_backend()
+            cfg = {}
+            if discord_backend is not None:
+                try:
+                    if hasattr(discord_backend, "get_config"):
+                        cfg = discord_backend.get_config() or {}
+                except Exception:
+                    cfg = {}
+            if not cfg:
+                cfg = {
+                    "channel_id": "",
+                    "bot_token_set": False,
+                    "connected": False,
+                }
+            reply = (
+                "Discord config: "
+                f"channel_id={cfg.get('channel_id', '')} "
+                f"bot_token_set={bool(cfg.get('bot_token_set', False))} "
+                f"connected={bool(cfg.get('connected', False))}"
+            )
+            replies.append(_shorten_text(reply.strip(), max_send_chars))
+        elif _SHOW_SLACK_CONFIG_RE.match(msg):
+            slack_backend = _load_slack_backend()
+            cfg = {}
+            if slack_backend is not None:
+                try:
+                    if hasattr(slack_backend, "get_config"):
+                        cfg = slack_backend.get_config() or {}
+                except Exception:
+                    cfg = {}
+            if not cfg:
+                cfg = {
+                    "channel_id": "",
+                    "bot_token_set": False,
+                    "connected": False,
+                }
+            reply = (
+                "Slack config: "
+                f"channel_id={cfg.get('channel_id', '')} "
+                f"bot_token_set={bool(cfg.get('bot_token_set', False))} "
+                f"connected={bool(cfg.get('connected', False))}"
+            )
+            replies.append(_shorten_text(reply.strip(), max_send_chars))
+        if len(replies) >= 3:
+            break
+    if not replies:
+        return None
+    cmds = " ".join(f"(send {json.dumps(reply)})" for reply in replies)
+    return f"({cmds})"
+
+
 def _search_items(raw):
     text = str(raw or "")
     items = []
@@ -724,6 +1052,15 @@ def _tool_skill_from_user_message(user_msg, max_send_chars):
     leave_cmd = _leave_channel_skill_from_user_message(user_msg)
     if leave_cmd is not None:
         return leave_cmd
+    commchannel_cmd = _commchannel_skill_from_user_message(user_msg, max_send_chars)
+    if commchannel_cmd is not None:
+        return commchannel_cmd
+    channel_list = _channel_list_skill_from_user_message(user_msg, max_send_chars)
+    if channel_list is not None:
+        return channel_list
+    channel_config = _channel_config_skill_from_user_message(user_msg, max_send_chars)
+    if channel_config is not None:
+        return channel_config
     model_control = _model_control_skill_from_user_message(user_msg, max_send_chars)
     if model_control is not None:
         return model_control
@@ -1064,35 +1401,58 @@ def _get_async_dispatch_executor():
         return _ASYNC_DISPATCH_EXECUTOR
 
 
-def _dispatch_text_to_channels(text, reply_channel=""):
-    msg = " ".join(str(text or "").split()).strip()
-    if not msg:
+def _dispatch_to_channel(channel, msg, reply_channel=""):
+    target = _normalize_commchannel(channel)
+    if not target:
         return False
-    sent = False
-    irc_backend = _load_irc_backend()
-    if irc_backend is not None:
+    if target == "irc":
+        irc_backend = _load_irc_backend()
+        if irc_backend is None:
+            return False
         try:
             connected = True
             if hasattr(irc_backend, "is_connected"):
                 connected = bool(irc_backend.is_connected())
-            if connected:
-                if reply_channel and hasattr(irc_backend, "send_message"):
-                    irc_backend.send_message(msg, reply_channel)
-                else:
-                    irc_backend.send_message(msg)
-                sent = True
+            if not connected:
+                return False
+            if reply_channel and hasattr(irc_backend, "send_message"):
+                irc_backend.send_message(msg, reply_channel)
+            else:
+                irc_backend.send_message(msg)
+            return True
         except Exception:
-            pass
-    if sent:
+            return False
+    if target == "mattermost":
+        backend = _load_mattermost_backend()
+    elif target == "telegram":
+        backend = _load_telegram_backend()
+    elif target == "discord":
+        backend = _load_discord_backend()
+    elif target == "slack":
+        backend = _load_slack_backend()
+    else:
+        backend = None
+    if backend is None:
+        return False
+    try:
+        backend.send_message(msg)
+        if hasattr(backend, "is_connected"):
+            return bool(backend.is_connected())
         return True
-    mattermost_backend = _load_mattermost_backend()
-    if mattermost_backend is not None:
-        try:
-            mattermost_backend.send_message(msg)
-            sent = True
-        except Exception:
-            pass
-    return sent
+    except Exception:
+        return False
+
+
+def _dispatch_text_to_channels(text, reply_channel=""):
+    msg = " ".join(str(text or "").split()).strip()
+    if not msg:
+        return False
+    active = _get_active_commchannel()
+    order = [active] + [channel for channel in _SUPPORTED_COMMCHANNELS if channel != active]
+    for channel in order:
+        if _dispatch_to_channel(channel, msg, reply_channel=reply_channel):
+            return True
+    return False
 
 
 def _dispatch_skill_output(skill_text, max_send_chars, reply_channel=""):

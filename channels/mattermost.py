@@ -102,6 +102,11 @@ def stop_mattermost():
     global _running
     _running = False
 
+
+def is_connected():
+    return _connected
+
+
 def send_message(text):
     text = text.replace("\\n", "\n")
     if not _connected:
@@ -111,3 +116,13 @@ def send_message(text):
         headers=_headers,
         json={"channel_id": CHANNEL_ID, "message": text}
     )
+
+
+def get_config():
+    return {
+        "running": bool(_running),
+        "connected": bool(_connected),
+        "url": str(MM_URL or ""),
+        "channel_id": str(CHANNEL_ID or ""),
+        "bot_token_set": bool(str(BOT_TOKEN or "").strip()),
+    }

@@ -13,6 +13,9 @@ _batch_channel_queue = deque()
 _msg_lock = threading.Lock()
 _channel = None
 _reply_channel_hint = ""
+_server = "irc.libera.chat"
+_port = 6667
+_nick = "mettaclaw"
 _connected = False
 _trace_lock = threading.Lock()
 _trace_next_id = 1
@@ -309,11 +312,14 @@ def _irc_loop(channel, server, port, nick):
 
 
 def start_irc(channel, server="irc.libera.chat", port=6667, nick="mettaclaw"):
-    global _running, _channel
+    global _running, _channel, _server, _port, _nick
     if os.getenv("IRC_RANDOM_SUFFIX", "true").strip().lower() in {"1", "true", "yes", "on"}:
         nick = f"{nick}{random.randint(1000, 9999)}"
     _running = True
     _channel = channel
+    _server = server
+    _port = port
+    _nick = nick
     _log(f"starting IRC thread for {server}:{port} channel={channel} nick={nick}")
     t = threading.Thread(target=_irc_loop, args=(channel, server, port, nick), daemon=True)
     t.start()
@@ -403,3 +409,15 @@ def send_message(text, channel=None):
                 f"[perf] msg#{item['id']} {status} recv->llm_req={d1}ms "
                 f"llm_req->llm_resp={d2}ms llm_resp->irc_send={d3}ms total={total}ms"
             )
+
+
+def get_config():
+    return {
+        "running": bool(_running),
+        "connected": bool(_connected),
+        "server": str(_server or ""),
+        "port": _port,
+        "nick": str(_nick or ""),
+        "channel": str(_channel or ""),
+        "reply_channel_hint": str(_reply_channel_hint or ""),
+    }
