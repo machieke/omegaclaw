@@ -9,8 +9,10 @@ _running = False
 _sock = None
 _sock_lock = threading.Lock()
 _message_queue = deque()
+_batch_channel_queue = deque()
 _msg_lock = threading.Lock()
 _channel = None
+_reply_channel_hint = ""
 _connected = False
 _trace_lock = threading.Lock()
 _trace_next_id = 1
@@ -150,18 +152,22 @@ def _trace_on_message_received(msg):
     _log(f"[perf] msg#{trace_id} received at {recv_wall_ms}ms text={msg[:120]}")
 
 
-def _set_last(msg):
+def _set_last(msg, channel=""):
     _trace_on_message_received(msg)
     with _msg_lock:
-        _message_queue.append(msg)
+        _message_queue.append((msg, str(channel or "").strip()))
 
 
 def getLastMessage():
+    global _reply_channel_hint
     batch = []
+    batch_channels = []
     batch_size = _receive_batch_size()
     with _msg_lock:
         while _message_queue and len(batch) < batch_size:
-            batch.append(_message_queue.popleft())
+            msg, channel = _message_queue.popleft()
+            batch.append(msg)
+            batch_channels.append(channel)
     if batch and len(batch) < batch_size:
         deadline = time.perf_counter() + _receive_coalesce_s()
         while len(batch) < batch_size and time.perf_counter() < deadline:
@@ -172,8 +178,19 @@ def getLastMessage():
             if got_item is None:
                 time.sleep(0.01)
                 continue
-            batch.append(got_item)
+            msg, channel = got_item
+            batch.append(msg)
+            batch_channels.append(channel)
     tmp = " | ".join(batch)
+    if batch_channels:
+        with _msg_lock:
+            _batch_channel_queue.append(list(batch_channels))
+    first_channel = ""
+    for channel in batch_channels:
+        if channel:
+            first_channel = channel
+            break
+    _reply_channel_hint = first_channel
     if _trace_enabled():
         global _trace_active
         with _trace_lock:
@@ -185,6 +202,20 @@ def getLastMessage():
             else:
                 _trace_active = []
     return tmp
+
+
+def consume_batch_channels(expected_count):
+    try:
+        wanted = int(expected_count)
+    except Exception:
+        wanted = 0
+    if wanted <= 0:
+        return []
+    with _msg_lock:
+        channels = list(_batch_channel_queue.popleft()) if _batch_channel_queue else []
+    if len(channels) < wanted:
+        channels.extend([""] * (wanted - len(channels)))
+    return channels[:wanted]
 
 
 def trace_llm_request():
@@ -262,8 +293,8 @@ def _irc_loop(channel, server, port, nick):
                         sender = prefix.split("!", 1)[0]
                         if " :" not in trailing:
                             continue
-                        msg = trailing.split(" :", 1)[1]
-                        _set_last(f"{sender}: {msg}")
+                        target, msg = trailing.split(" :", 1)
+                        _set_last(f"{sender}: {msg}", target.split()[0].strip())
                     except Exception as exc:
                         _log(f"message parse error: {exc}")
     except Exception as exc:
@@ -294,24 +325,67 @@ def stop_irc():
     _running = False
 
 
-def send_message(text):
-    sent = False
+def join_channel(channel):
+    global _channel
+    ch = str(channel or "").strip()
+    if not ch:
+        return False
+    if not ch.startswith("#"):
+        ch = f"#{ch.lstrip('#')}"
+    _channel = ch
     if _connected:
+        _send(f"JOIN {ch}")
+        _log(f"joining {ch}")
+        return True
+    _log(f"join queued until connected: {ch}")
+    return False
+
+
+def leave_channel(channel):
+    global _channel, _reply_channel_hint
+    ch = str(channel or "").strip()
+    if not ch:
+        return False
+    if not ch.startswith("#"):
+        ch = f"#{ch.lstrip('#')}"
+    if _connected:
+        _send(f"PART {ch}")
+        _log(f"leaving {ch}")
+        if _channel == ch:
+            _channel = ""
+        if _reply_channel_hint == ch:
+            _reply_channel_hint = ""
+        return True
+    _log(f"leave ignored (not connected): {ch}")
+    if _channel == ch:
+        _channel = ""
+    if _reply_channel_hint == ch:
+        _reply_channel_hint = ""
+    return False
+
+
+def send_message(text, channel=None):
+    sent = False
+    target = str(channel or "").strip() or str(_reply_channel_hint or "").strip() or _channel
+    if _connected and target:
         chunks = _split_outgoing_chunks(text, _irc_max_msg_len())
         delay_s = _chunk_delay_s()
         total_chunks = len(chunks)
         for idx, chunk in enumerate(chunks, start=1):
-            _send(f"PRIVMSG {_channel} :{chunk}")
+            _send(f"PRIVMSG {target} :{chunk}")
             sent = True
             if os.getenv("IRC_LOG_OUTBOUND", "true").strip().lower() in {"1", "true", "yes", "on"}:
                 if total_chunks > 1:
-                    _log(f"sent to {_channel} [{idx}/{total_chunks}]: {chunk[:160]}")
+                    _log(f"sent to {target} [{idx}/{total_chunks}]: {chunk[:160]}")
                 else:
-                    _log(f"sent to {_channel}: {chunk[:160]}")
+                    _log(f"sent to {target}: {chunk[:160]}")
             if idx < total_chunks and delay_s > 0:
                 time.sleep(delay_s)
     else:
-        _log(f"send dropped (not connected): {text[:120]}")
+        if not _connected:
+            _log(f"send dropped (not connected): {text[:120]}")
+        else:
+            _log(f"send dropped (no target channel): {text[:120]}")
     if _trace_enabled():
         now = _now_ms()
         with _trace_lock:

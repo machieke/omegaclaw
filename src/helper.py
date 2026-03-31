@@ -22,7 +22,7 @@ _OLLAMA_CLIENT_LOCK = threading.Lock()
 _PREWARM_LOCK = threading.Lock()
 _PREWARM_THREAD_STARTED = False
 _SKILL_START_RE = re.compile(
-    r"^\s*\(\s*(\(\s*)?(remember|query|pin|shell|read-file|write-file|append-file|send|search|metta)\b"
+    r"^\s*\(\s*(\(\s*)?(remember|query|pin|shell|read-file|write-file|append-file|send|search|metta|join-channel|join|leave-channel|leave)\b"
 )
 _SEND_STR_RE = re.compile(r'(\(\s*send\s+")((?:\\.|[^"\\])*)(")', re.DOTALL)
 _META_REPLY_RE = re.compile(
@@ -52,6 +52,8 @@ _CURRENT_MODEL_RE = re.compile(
     r"|^\s*(?:current|active)\s+model\??\s*$",
     re.IGNORECASE,
 )
+_JOIN_CHANNEL_REQ_RE = re.compile(r"^join(?:-channel|\s+channel)?\s+(.+?)$", re.IGNORECASE)
+_LEAVE_CHANNEL_REQ_RE = re.compile(r"^leave(?:-channel|\s+channel)?\s+(.+?)$", re.IGNORECASE)
 _MODEL_LIST_RE = re.compile(
     r"(?:\b(?:list|show)\s+(?:ollama\s+)?models?\b|\bollama\s+list\b|\bwhat\s+models?\b)",
     re.IGNORECASE,
@@ -525,6 +527,100 @@ def _set_active_chat_model(model_name):
         _ACTIVE_CHAT_MODEL = chosen
 
 
+def _parse_join_channel_target(text):
+    msg = _decode_special_tokens(text).strip()
+    while msg.startswith("(") and msg.endswith(")") and len(msg) > 2:
+        inner = msg[1:-1].strip()
+        if not inner:
+            break
+        msg = inner
+    match = _JOIN_CHANNEL_REQ_RE.match(msg)
+    if match is None:
+        return ""
+    channel = match.group(1).strip().strip('"').strip("'")
+    if not channel:
+        return ""
+    if " " in channel:
+        channel = channel.split()[0].strip()
+    if not channel:
+        return ""
+    if not channel.startswith("#"):
+        channel = f"#{channel.lstrip('#')}"
+    return channel
+
+
+def _parse_leave_channel_target(text):
+    msg = _decode_special_tokens(text).strip()
+    while msg.startswith("(") and msg.endswith(")") and len(msg) > 2:
+        inner = msg[1:-1].strip()
+        if not inner:
+            break
+        msg = inner
+    match = _LEAVE_CHANNEL_REQ_RE.match(msg)
+    if match is None:
+        return ""
+    channel = match.group(1).strip().strip('"').strip("'")
+    if not channel:
+        return ""
+    if " " in channel:
+        channel = channel.split()[0].strip()
+    if not channel:
+        return ""
+    if not channel.startswith("#"):
+        channel = f"#{channel.lstrip('#')}"
+    return channel
+
+
+def _join_channel_skill_from_user_message(user_msg):
+    replies = []
+    irc_backend = _load_irc_backend()
+    for part in _extract_user_parts(user_msg):
+        channel = _parse_join_channel_target(_strip_user_prefix(part))
+        if not channel:
+            continue
+        joined = False
+        if irc_backend is not None and hasattr(irc_backend, "join_channel"):
+            try:
+                joined = bool(irc_backend.join_channel(channel))
+            except Exception:
+                joined = False
+        if joined:
+            replies.append(f"Joined {channel}.")
+        else:
+            replies.append(f"Joining {channel}.")
+        if len(replies) >= 3:
+            break
+    if not replies:
+        return None
+    cmds = " ".join(f"(send {json.dumps(reply)})" for reply in replies)
+    return f"({cmds})"
+
+
+def _leave_channel_skill_from_user_message(user_msg):
+    replies = []
+    irc_backend = _load_irc_backend()
+    for part in _extract_user_parts(user_msg):
+        channel = _parse_leave_channel_target(_strip_user_prefix(part))
+        if not channel:
+            continue
+        left = False
+        if irc_backend is not None and hasattr(irc_backend, "leave_channel"):
+            try:
+                left = bool(irc_backend.leave_channel(channel))
+            except Exception:
+                left = False
+        if left:
+            replies.append(f"Leaving {channel}.")
+        else:
+            replies.append(f"Leave requested for {channel}.")
+        if len(replies) >= 3:
+            break
+    if not replies:
+        return None
+    cmds = " ".join(f"(send {json.dumps(reply)})" for reply in replies)
+    return f"({cmds})"
+
+
 def _model_control_skill_from_user_message(user_msg, max_send_chars):
     replies = []
     names = []
@@ -622,6 +718,12 @@ def _best_search_snippet(query, raw):
 
 
 def _tool_skill_from_user_message(user_msg, max_send_chars):
+    join_cmd = _join_channel_skill_from_user_message(user_msg)
+    if join_cmd is not None:
+        return join_cmd
+    leave_cmd = _leave_channel_skill_from_user_message(user_msg)
+    if leave_cmd is not None:
+        return leave_cmd
     model_control = _model_control_skill_from_user_message(user_msg, max_send_chars)
     if model_control is not None:
         return model_control
@@ -962,7 +1064,7 @@ def _get_async_dispatch_executor():
         return _ASYNC_DISPATCH_EXECUTOR
 
 
-def _dispatch_text_to_channels(text):
+def _dispatch_text_to_channels(text, reply_channel=""):
     msg = " ".join(str(text or "").split()).strip()
     if not msg:
         return False
@@ -974,7 +1076,10 @@ def _dispatch_text_to_channels(text):
             if hasattr(irc_backend, "is_connected"):
                 connected = bool(irc_backend.is_connected())
             if connected:
-                irc_backend.send_message(msg)
+                if reply_channel and hasattr(irc_backend, "send_message"):
+                    irc_backend.send_message(msg, reply_channel)
+                else:
+                    irc_backend.send_message(msg)
                 sent = True
         except Exception:
             pass
@@ -990,10 +1095,10 @@ def _dispatch_text_to_channels(text):
     return sent
 
 
-def _dispatch_skill_output(skill_text, max_send_chars):
+def _dispatch_skill_output(skill_text, max_send_chars, reply_channel=""):
     sent_count = 0
     for payload in _extract_send_payloads(skill_text):
-        if _dispatch_text_to_channels(_shorten_text(payload, max_send_chars)):
+        if _dispatch_text_to_channels(_shorten_text(payload, max_send_chars), reply_channel=reply_channel):
             sent_count += 1
     return sent_count
 
@@ -1009,7 +1114,7 @@ def _sender_dispatch_lock(user_msg):
         return lock
 
 
-def _async_dispatch_one_message(user_msg):
+def _async_dispatch_one_message(user_msg, reply_channel=""):
     msg = str(user_msg or "").strip()
     if not msg:
         return
@@ -1032,7 +1137,7 @@ def _async_dispatch_one_message(user_msg):
         normalized = normalize_skill_output(
             candidate, msg, True, max_send_chars=max_send_chars, skip_async_guard=True
         )
-        sent_count = _dispatch_skill_output(normalized, max_send_chars)
+        sent_count = _dispatch_skill_output(normalized, max_send_chars, reply_channel=reply_channel)
         _trace_perf(
             f"async_dispatch path={path} sent={sent_count} "
             f"msg_chars={len(msg)} ms={int((time.perf_counter() - started) * 1000)}"
@@ -1059,12 +1164,23 @@ def _enqueue_async_dispatch(user_msg):
     if not batch:
         return 0
 
-    def run_batch(items):
-        for item in items:
-            _async_dispatch_one_message(item)
+    reply_channels = []
+    irc_backend = _load_irc_backend()
+    if irc_backend is not None and hasattr(irc_backend, "consume_batch_channels"):
+        try:
+            reply_channels = list(irc_backend.consume_batch_channels(len(batch)))
+        except Exception:
+            reply_channels = []
+    if len(reply_channels) < len(batch):
+        reply_channels.extend([""] * (len(batch) - len(reply_channels)))
+    items = list(zip(batch, reply_channels))
+
+    def run_batch(pairs):
+        for item, reply_channel in pairs:
+            _async_dispatch_one_message(item, reply_channel=reply_channel)
 
     executor = _get_async_dispatch_executor()
-    executor.submit(run_batch, batch)
+    executor.submit(run_batch, items)
     return len(batch)
 
 

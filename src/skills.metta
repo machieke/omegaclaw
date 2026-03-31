@@ -10,6 +10,8 @@
     "- Append line to file: (append-file filename string)",
     ;COMMUNICATION CHANNELS:
     "- Send message to user: (send string)"
+    "- Join an IRC channel: (join-channel #channel) or (join channel #channel)"
+    "- Leave an IRC channel: (leave-channel #channel) or (leave #channel)"
     "- Search the web: (search string)"
     ;CODE EXECUTION:
     "- Execute MeTTa expression: (metta string)"))

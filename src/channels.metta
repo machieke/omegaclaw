@@ -39,3 +39,29 @@
 ;Search the internet for some information:
 (= (search $msg)
    (py-call (websearch.search $msg)))
+
+;Join an IRC channel and switch active outbound target channel.
+(= (join-channel $channel)
+   (if (== (commchannel) irc)
+       (py-call (irc.join_channel $channel))
+       False))
+
+;Alias forms:
+(= (join $channel)
+   (join-channel $channel))
+
+(= (join channel $channel)
+   (join-channel $channel))
+
+;Leave an IRC channel and keep current outbound target aligned.
+(= (leave-channel $channel)
+   (if (== (commchannel) irc)
+       (py-call (irc.leave_channel $channel))
+       False))
+
+;Alias forms:
+(= (leave $channel)
+   (leave-channel $channel))
+
+(= (leave channel $channel)
+   (leave-channel $channel))
