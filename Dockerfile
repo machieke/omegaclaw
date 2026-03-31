@@ -44,7 +44,9 @@ RUN sh build.sh
 
 RUN python3 -m pip install --no-cache-dir --break-system-packages \
       janus-swi \
-      openai
+      openai \
+      chromadb \
+      httpx
 
 FROM ${SWIPL_IMAGE} AS runtime
 
