@@ -1,7 +1,6 @@
 import json
 import os
 import re
-import secrets
 import sys
 import threading
 import time
@@ -14,6 +13,14 @@ try:
     import httpx
 except Exception:
     httpx = None
+
+try:
+    import auth_runtime
+except Exception:
+    here = os.path.dirname(__file__)
+    if here and here not in sys.path:
+        sys.path.append(here)
+    import auth_runtime
 
 _ENSURED_MODELS = set()
 _PREWARMED_MODELS = set()
@@ -82,10 +89,6 @@ _USE_CHANNEL_RE = re.compile(
     re.IGNORECASE,
 )
 _SEARCH_RESULT_ITEM_RE = re.compile(r"\(TITLE:\s*(.*?)\s+SNIPPET:\s*(.*?)\)\s*", re.DOTALL)
-_AUTH_REGISTER_RE = re.compile(
-    r"^\s*(?:auth(?:enticate)?|register)\s+(.+?)\s*$",
-    re.IGNORECASE,
-)
 _ASYNC_DISPATCH_LOCK = threading.Lock()
 _ASYNC_DISPATCH_EXECUTOR = None
 _ASYNC_DISPATCH_WORKERS = 0
@@ -99,13 +102,6 @@ _ACTIVE_COMMCHANNEL = str(os.getenv("METTACLAW_COMMCHANNEL", "irc") or "").strip
 _IDLE_QUERY_LOCK = threading.Lock()
 _LAST_IDLE_QUERY = ""
 _LAST_IDLE_QUERY_COUNT = 0
-_AUTH_LOCK = threading.Lock()
-_AUTH_SECRET = ""
-_AUTH_REGISTERED_USER = ""
-_AUTH_REGISTERED_CHANNEL = ""
-_AUTH_REGISTERED_AT = ""
-_AUTH_NOTICE_POSTED = set()
-_AUTH_HINTED_SENDERS = {}
 
 
 def _balanced_parentheses(text):
@@ -1535,169 +1531,29 @@ def _json_quote(text):
     return json.dumps(str(text), ensure_ascii=False)
 
 
-def _normalize_sender(sender):
-    return str(sender or "").strip().lower()
-
-
-def _auth_enabled():
-    return _is_true(os.getenv("METTACLAW_AUTH_REQUIRED", "true"))
-
-
-def _auth_log(msg):
-    print(f"[auth] {msg}", flush=True)
-
-
-def _bootstrap_auth_state():
-    global _AUTH_SECRET
-    if not _auth_enabled():
-        return
-    with _AUTH_LOCK:
-        if _AUTH_REGISTERED_USER:
-            return
-        if _AUTH_SECRET:
-            return
-        configured = str(os.getenv("METTACLAW_AUTH_SECRET", "") or "").strip()
-        if configured:
-            _AUTH_SECRET = configured
-        else:
-            secret_bytes = _int_env("METTACLAW_AUTH_SECRET_BYTES", 12)
-            if secret_bytes < 8:
-                secret_bytes = 8
-            if secret_bytes > 64:
-                secret_bytes = 64
-            _AUTH_SECRET = secrets.token_hex(secret_bytes)
-        _auth_log("startup one-time secret generated")
-        _auth_log("post the secret (or: auth <secret>) in a commchannel to register the controlling user")
-        _auth_log(f"startup secret: {_AUTH_SECRET}")
-
-
-def _unwrap_secret_token(token):
-    text = str(token or "").strip()
-    if not text:
-        return ""
-    if len(text) >= 2 and text[0] == text[-1] and text[0] in {"'", '"', "`"}:
-        text = text[1:-1].strip()
-    text = text.rstrip(".,!?;:")
-    return text
-
-
-def _extract_registration_token(text):
-    msg = _decode_special_tokens(str(text or "")).strip()
-    if not msg:
-        return ""
-    while msg.startswith("(") and msg.endswith(")") and len(msg) > 2:
-        inner = msg[1:-1].strip()
-        if not inner:
-            break
-        msg = inner
-    match = _AUTH_REGISTER_RE.match(msg)
-    if match is not None:
-        return _unwrap_secret_token(match.group(1))
-    return _unwrap_secret_token(msg)
-
-
-def _registered_sender():
-    with _AUTH_LOCK:
-        return str(_AUTH_REGISTERED_USER or "").strip()
-
-
-def _auth_notice_text():
-    return "Authentication required. Post startup secret as: auth <secret>"
+def _configure_auth_runtime():
+    auth_runtime.configure(
+        is_true_fn=_is_true,
+        int_env_fn=_int_env,
+        decode_special_tokens_fn=_decode_special_tokens,
+        extract_user_parts_fn=_extract_user_parts,
+        split_sender_and_text_fn=_split_sender_and_text,
+        normalize_commchannel_fn=_normalize_commchannel,
+        get_active_commchannel_fn=_get_active_commchannel,
+        dispatch_to_channel_fn=_dispatch_to_channel,
+    )
 
 
 def _announce_auth_notice(channel):
-    target = _normalize_commchannel(channel)
-    if not target:
-        return False
-    if not _auth_enabled():
-        return False
-    _bootstrap_auth_state()
-    with _AUTH_LOCK:
-        if _AUTH_REGISTERED_USER:
-            return False
-        if target in _AUTH_NOTICE_POSTED:
-            return True
-    sent = _dispatch_to_channel(target, _auth_notice_text())
-    if sent:
-        with _AUTH_LOCK:
-            _AUTH_NOTICE_POSTED.add(target)
-        _auth_log(f"posted auth notice in channel={target}")
-    return sent
-
-
-def _should_send_auth_hint(sender):
-    cooldown_s = _int_env("METTACLAW_AUTH_HINT_COOLDOWN_S", 45)
-    if cooldown_s < 0:
-        cooldown_s = 0
-    now = time.monotonic()
-    key = _normalize_sender(sender) or "_"
-    with _AUTH_LOCK:
-        last = float(_AUTH_HINTED_SENDERS.get(key, 0.0))
-        if now - last < float(cooldown_s):
-            return False
-        _AUTH_HINTED_SENDERS[key] = now
-        return True
-
-
-def _register_authenticated_user(sender, channel):
-    global _AUTH_REGISTERED_USER, _AUTH_REGISTERED_CHANNEL, _AUTH_REGISTERED_AT, _AUTH_SECRET
-    user = str(sender or "").strip()
-    if not user:
-        return False
-    target = _normalize_commchannel(channel)
-    if not target:
-        target = _get_active_commchannel()
-    with _AUTH_LOCK:
-        _AUTH_REGISTERED_USER = user
-        _AUTH_REGISTERED_CHANNEL = target
-        _AUTH_REGISTERED_AT = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
-        _AUTH_SECRET = ""
-    _dispatch_to_channel(target, f"Authenticated user registered: {user}.")
-    _auth_log(f"registered authenticated user={user} channel={target} at={_AUTH_REGISTERED_AT}")
-    return True
+    return bool(auth_runtime.announce_auth_notice(channel))
 
 
 def _filter_incoming_by_auth(raw_msg, source_channel):
-    text = str(raw_msg or "").strip()
-    if not text:
-        return ""
-    if not _auth_enabled():
-        return text
-    _bootstrap_auth_state()
+    return auth_runtime.filter_incoming_by_auth(raw_msg, source_channel)
 
-    accepted = []
-    source = _normalize_commchannel(source_channel) or _get_active_commchannel()
-    for part in _extract_user_parts(text):
-        item = str(part or "").strip()
-        if not item:
-            continue
-        sender, body = _split_sender_and_text(item)
-        sender_name = str(sender or "").strip()
-        if not sender_name:
-            continue
 
-        current = _registered_sender()
-        if current:
-            if _normalize_sender(sender_name) == _normalize_sender(current):
-                accepted.append(item)
-            else:
-                _auth_log(f"ignored sender={sender_name} in channel={source} (registered={current})")
-                if _should_send_auth_hint(sender_name):
-                    _dispatch_to_channel(source, _auth_notice_text())
-            continue
-
-        candidate = _extract_registration_token(body)
-        with _AUTH_LOCK:
-            expected = str(_AUTH_SECRET or "").strip()
-        if expected and candidate and candidate == expected:
-            _register_authenticated_user(sender_name, source)
-            continue
-
-        _auth_log(f"ignored unauthenticated sender={sender_name} in channel={source}")
-        if _should_send_auth_hint(sender_name):
-            _dispatch_to_channel(source, _auth_notice_text())
-
-    return " | ".join(accepted)
+def _bootstrap_auth_state():
+    return auth_runtime.bootstrap_auth_state()
 
 
 def pick_loop_context(candidates):
@@ -2486,6 +2342,11 @@ try:
     _start_background_prewarm()
 except Exception:
     pass
+
+try:
+    _configure_auth_runtime()
+except Exception as exc:
+    print(f"[auth] configure failed: {exc}", flush=True)
 
 try:
     _bootstrap_auth_state()
