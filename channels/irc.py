@@ -21,6 +21,8 @@ _trace_lock = threading.Lock()
 _trace_next_id = 1
 _trace_pending = deque()
 _trace_active = []
+_last_sent_lock = threading.Lock()
+_last_sent = {"target": "", "msg": "", "ts_ms": 0}
 
 
 def _log(msg):
@@ -107,6 +109,19 @@ def _receive_coalesce_s():
     if value > 2000:
         value = 2000
     return float(value) / 1000.0
+
+
+def _dedupe_window_ms():
+    raw = os.getenv("IRC_DEDUP_WINDOW_MS", "800").strip()
+    try:
+        value = int(raw)
+    except ValueError:
+        value = 800
+    if value < 0:
+        return 0
+    if value > 5000:
+        return 5000
+    return value
 
 
 def _split_outgoing_chunks(text, max_len):
@@ -373,8 +388,25 @@ def leave_channel(channel):
 def send_message(text, channel=None):
     sent = False
     target = str(channel or "").strip() or str(_reply_channel_hint or "").strip() or _channel
+    compact = " ".join(str(text or "").split()).strip()
     if _connected and target:
-        chunks = _split_outgoing_chunks(text, _irc_max_msg_len())
+        now_ms = _now_ms()
+        window_ms = _dedupe_window_ms()
+        if window_ms > 0:
+            with _last_sent_lock:
+                recent = _last_sent.copy()
+                if (
+                    recent.get("target") == target
+                    and recent.get("msg") == compact
+                    and (now_ms - int(recent.get("ts_ms", 0))) <= window_ms
+                ):
+                    _log(f"duplicate outbound suppressed for {target}: {compact[:160]}")
+                    return
+                _last_sent["target"] = target
+                _last_sent["msg"] = compact
+                _last_sent["ts_ms"] = now_ms
+
+        chunks = _split_outgoing_chunks(compact, _irc_max_msg_len())
         delay_s = _chunk_delay_s()
         total_chunks = len(chunks)
         for idx, chunk in enumerate(chunks, start=1):

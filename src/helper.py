@@ -25,6 +25,7 @@ _SKILL_START_RE = re.compile(
     r"^\s*\(\s*(\(\s*)?(remember|query|pin|shell|read-file|write-file|append-file|send|search|metta|join-channel|join|leave-channel|leave)\b"
 )
 _SEND_STR_RE = re.compile(r'(\(\s*send\s+")((?:\\.|[^"\\])*)(")', re.DOTALL)
+_QUERY_ONLY_RE = re.compile(r'^\(\(\s*query\s+"((?:\\.|[^"\\])*)"\s*\)\)$', re.IGNORECASE)
 _META_REPLY_RE = re.compile(
     r"(continuous loop|self-chosen long-term goals|initial memory state|current goal|task context|"
     r"follow the instructions|use send commands to keep people engaged)",
@@ -90,6 +91,9 @@ _ACTIVE_CHAT_MODEL = ""
 _SUPPORTED_COMMCHANNELS = ("irc", "mattermost", "telegram", "discord", "slack")
 _ACTIVE_COMMCHANNEL_LOCK = threading.Lock()
 _ACTIVE_COMMCHANNEL = str(os.getenv("METTACLAW_COMMCHANNEL", "irc") or "").strip().lower()
+_IDLE_QUERY_LOCK = threading.Lock()
+_LAST_IDLE_QUERY = ""
+_LAST_IDLE_QUERY_COUNT = 0
 
 
 def _balanced_parentheses(text):
@@ -117,6 +121,46 @@ def _balanced_parentheses(text):
                 return False
 
     return depth == 0 and not in_string
+
+
+def _paren_depth(text):
+    depth = 0
+    in_string = False
+    escaped = False
+    for ch in str(text or ""):
+        if in_string:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_string = False
+            continue
+        if ch == '"':
+            in_string = True
+        elif ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+    return depth, in_string
+
+
+def _repair_partial_skill_output(text):
+    raw = str(text or "").strip()
+    if not raw.startswith("("):
+        return None
+    if _SKILL_START_RE.match(raw) is None:
+        return None
+    fixed = raw
+    depth, in_string = _paren_depth(fixed)
+    if in_string:
+        fixed += '"'
+        depth, _ = _paren_depth(fixed)
+    if depth > 0:
+        fixed += ")" * depth
+    elif depth < 0:
+        fixed = ("(" * (-depth)) + fixed
+    return fixed
 
 
 def _looks_like_skill_output(text):
@@ -185,7 +229,7 @@ def _clamp_send_payloads(skill_text, max_send_chars):
         except Exception:
             decoded = payload
         shortened = _shorten_text(decoded, max_send_chars)
-        reescaped = json.dumps(shortened)[1:-1]
+        reescaped = json.dumps(shortened, ensure_ascii=False)[1:-1]
         return f"{match.group(1)}{reescaped}{match.group(3)}"
 
     return _SEND_STR_RE.sub(repl, skill_text)
@@ -861,7 +905,7 @@ def _join_channel_skill_from_user_message(user_msg):
             break
     if not replies:
         return None
-    cmds = " ".join(f"(send {json.dumps(reply)})" for reply in replies)
+    cmds = " ".join(f"(send {_json_quote(reply)})" for reply in replies)
     return f"({cmds})"
 
 
@@ -886,7 +930,7 @@ def _leave_channel_skill_from_user_message(user_msg):
             break
     if not replies:
         return None
-    cmds = " ".join(f"(send {json.dumps(reply)})" for reply in replies)
+    cmds = " ".join(f"(send {_json_quote(reply)})" for reply in replies)
     return f"({cmds})"
 
 
@@ -919,7 +963,7 @@ def _model_control_skill_from_user_message(user_msg, max_send_chars):
             replies.append(_shorten_text(f"Current model is {current}.", max_send_chars))
     if not replies:
         return None
-    cmds = " ".join(f"(send {json.dumps(reply)})" for reply in replies[:3])
+    cmds = " ".join(f"(send {_json_quote(reply)})" for reply in replies[:3])
     return f"({cmds})"
 
 
@@ -942,7 +986,7 @@ def _model_list_skill_from_user_message(user_msg, max_send_chars):
             break
     if not replies:
         return None
-    cmds = " ".join(f"(send {json.dumps(reply)})" for reply in replies)
+    cmds = " ".join(f"(send {_json_quote(reply)})" for reply in replies)
     return f"({cmds})"
 
 
@@ -957,7 +1001,7 @@ def _channel_list_skill_from_user_message(user_msg, max_send_chars):
             break
     if not replies:
         return None
-    cmds = " ".join(f"(send {json.dumps(reply)})" for reply in replies)
+    cmds = " ".join(f"(send {_json_quote(reply)})" for reply in replies)
     return f"({cmds})"
 
 
@@ -981,7 +1025,7 @@ def _commchannel_skill_from_user_message(user_msg, max_send_chars):
             break
     if not replies:
         return None
-    cmds = " ".join(f"(send {json.dumps(reply)})" for reply in replies)
+    cmds = " ".join(f"(send {_json_quote(reply)})" for reply in replies)
     return f"({cmds})"
 
 
@@ -1109,7 +1153,7 @@ def _channel_config_skill_from_user_message(user_msg, max_send_chars):
             break
     if not replies:
         return None
-    cmds = " ".join(f"(send {json.dumps(reply)})" for reply in replies)
+    cmds = " ".join(f"(send {_json_quote(reply)})" for reply in replies)
     return f"({cmds})"
 
 
@@ -1196,7 +1240,7 @@ def _tool_skill_from_user_message(user_msg, max_send_chars):
             break
     if not replies:
         return None
-    cmds = " ".join(f"(send {json.dumps(reply)})" for reply in replies)
+    cmds = " ".join(f"(send {_json_quote(reply)})" for reply in replies)
     return f"({cmds})"
 
 
@@ -1272,9 +1316,9 @@ def _recall_user_likes(user_msg, max_send_chars):
                 else:
                     answer = f"Yes, your {status_subject} is dead." if known_state == "dead" else f"No, your {status_subject} is alive."
                 reply = _shorten_text(answer, max_send_chars)
-                return f"((send {json.dumps(reply)}))"
+                return f"((send {_json_quote(reply)}))"
             unknown_reply = _shorten_text("I don't know.", max_send_chars)
-            return f"((send {json.dumps(unknown_reply)}))"
+            return f"((send {_json_quote(unknown_reply)}))"
         named_subject = _parse_named_query(msg)
         if named_subject:
             query_text = f"{sender} named {named_subject}"
@@ -1296,10 +1340,10 @@ def _recall_user_likes(user_msg, max_send_chars):
                     continue
                 found = True
                 reply = _shorten_text(f"Your {named_subject} is called {value}.", max_send_chars)
-                return f"((send {json.dumps(reply)}))"
+                return f"((send {_json_quote(reply)}))"
             if not found:
                 unknown_reply = _shorten_text("I don't know.", max_send_chars)
-                return f"((send {json.dumps(unknown_reply)}))"
+                return f"((send {_json_quote(unknown_reply)}))"
         if _LIKE_QUERY_RE.match(msg):
             query_text = f"{sender} likes"
             try:
@@ -1318,7 +1362,7 @@ def _recall_user_likes(user_msg, max_send_chars):
                 if not liked:
                     continue
                 reply = _shorten_text(f"You said you like {liked}.", max_send_chars)
-                return f"((send {json.dumps(reply)}))"
+                return f"((send {_json_quote(reply)}))"
     return None
 
 
@@ -1460,7 +1504,7 @@ def _direct_skill_from_user_message(user_msg, max_send_chars):
     replies = [reply for reply in replies_by_index if reply]
     if not replies:
         return None
-    cmds = " ".join(f"(send {json.dumps(reply)})" for reply in replies)
+    cmds = " ".join(f"(send {_json_quote(reply)})" for reply in replies)
     return f"({cmds})"
 
 
@@ -1468,6 +1512,95 @@ def _is_true(value):
     if isinstance(value, bool):
         return value
     return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _json_quote(text):
+    return json.dumps(str(text), ensure_ascii=False)
+
+
+def pick_loop_context(candidates):
+    if isinstance(candidates, (list, tuple)):
+        best = ""
+        for item in candidates:
+            text = str(item or "").strip()
+            if len(text) > len(best):
+                best = text
+        return best
+    return str(candidates or "").strip()
+
+
+def ensure_history_file(path):
+    target = str(path or "").strip()
+    if not target:
+        return False
+    try:
+        parent = os.path.dirname(target)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        with open(target, "a", encoding="utf-8"):
+            pass
+        return True
+    except Exception as exc:
+        print(f"[helper] [history] ensure failed: {exc}", flush=True)
+        return False
+
+
+def build_loop_prompt(context_prompt, user_msg="", msg_new=False):
+    ctx = str(context_prompt or "").strip()
+    msg = str(user_msg or "").strip()
+    is_new = "true" if _is_true(msg_new) else "false"
+    last = f"HUMAN-LAST-MSG: {msg} MESSAGE-IS-NEW: {is_new}"
+    if not ctx:
+        return last
+    return f"{ctx}\n{last}"
+
+
+def enforce_idle_progress(skill_text, msg_new=False):
+    global _LAST_IDLE_QUERY, _LAST_IDLE_QUERY_COUNT
+    text = str(skill_text or "").strip()
+    if not text:
+        return "()"
+    if _is_true(msg_new):
+        with _IDLE_QUERY_LOCK:
+            _LAST_IDLE_QUERY = ""
+            _LAST_IDLE_QUERY_COUNT = 0
+        return text
+
+    match = _QUERY_ONLY_RE.match(text)
+    if not match:
+        with _IDLE_QUERY_LOCK:
+            _LAST_IDLE_QUERY = ""
+            _LAST_IDLE_QUERY_COUNT = 0
+        return text
+
+    query_raw = match.group(1)
+    try:
+        query_value = json.loads(f'"{query_raw}"')
+    except Exception:
+        query_value = query_raw
+    query_value = str(query_value or "").strip()
+    if not query_value:
+        return text
+
+    with _IDLE_QUERY_LOCK:
+        if query_value == _LAST_IDLE_QUERY:
+            _LAST_IDLE_QUERY_COUNT += 1
+        else:
+            _LAST_IDLE_QUERY = query_value
+            _LAST_IDLE_QUERY_COUNT = 1
+        repeat_count = _LAST_IDLE_QUERY_COUNT
+
+    if repeat_count < 2:
+        return text
+
+    query_q = _json_quote(query_value)
+    remember_q = _json_quote(f"Candidate long-term goal topic: {query_value}")
+    send_q = _json_quote(
+        "I need one concrete, measurable milestone to progress this goal. What should be first?"
+    )
+    with _IDLE_QUERY_LOCK:
+        _LAST_IDLE_QUERY_COUNT = 0
+    return f"((query {query_q}) (remember {remember_q}) (send {send_q}))"
 
 
 def _trace_perf_enabled():
@@ -1675,6 +1808,10 @@ def normalize_skill_output(s, user_msg="", msg_new=False, max_send_chars=None, s
 
     text = str(s or "").strip()
 
+    repaired = _repair_partial_skill_output(text)
+    if repaired is not None and _looks_like_skill_output(repaired):
+        text = repaired
+
     # If the model already emitted one of the supported skill commands,
     # keep it and just normalize parenthesis framing.
     if _looks_like_skill_output(text):
@@ -1693,7 +1830,11 @@ def normalize_skill_output(s, user_msg="", msg_new=False, max_send_chars=None, s
 
     plain = text.replace("\r\n", "\n").replace("\r", "\n")
     plain = plain.replace("_newline_", "\n").replace("_apostrophe_", "'").replace("_quote_", '"')
-    return f"((send {json.dumps(_shorten_text(plain, max_send_chars))}))"
+    shortened = _shorten_text(plain, max_send_chars)
+    cleaned = _trim_incomplete_tail(shortened)
+    if not cleaned:
+        cleaned = shortened
+    return f"((send {_json_quote(cleaned)}))"
 
 
 def _ollama_base_url():
@@ -1779,7 +1920,7 @@ def _effective_num_predict(max_tokens):
     except Exception:
         requested = 128
     requested = max(1, requested)
-    cap = _int_env("OLLAMA_NUM_PREDICT_CAP", 96)
+    cap = _int_env("OLLAMA_NUM_PREDICT_CAP", 192)
     if cap > 0:
         requested = min(requested, cap)
     return requested
@@ -1789,6 +1930,8 @@ def _build_ollama_options(num_predict):
     options = {"num_predict": int(num_predict)}
     num_ctx = _int_env("OLLAMA_NUM_CTX", 0)
     if num_ctx > 0:
+        if num_ctx < 2048:
+            num_ctx = 2048
         options["num_ctx"] = num_ctx
     temperature_raw = os.getenv("OLLAMA_TEMPERATURE", "").strip()
     if temperature_raw:
@@ -2084,6 +2227,7 @@ def ollama_chat(model, prompt, max_tokens, effort):
     _prewarm_chat_model(chosen_model)
     think = _ollama_think(effort)
     num_predict = _effective_num_predict(max_tokens)
+    print(f"[helper] [ollama_chat] [prompt] {str(prompt)}", flush=True)
     payload = {
         "model": chosen_model,
         "messages": [{"role": "user", "content": str(prompt)}],
@@ -2111,10 +2255,13 @@ def ollama_chat(model, prompt, max_tokens, effort):
     )
     msg = (res.get("message") or {}).get("content")
     if isinstance(msg, str):
+        print(f"[helper] [ollama_chat] [msg] {msg}", flush=True)
         return msg
     fallback = res.get("response")
     if isinstance(fallback, str):
+        print(f"[helper] [ollama_chat] [fallback] {fallback}", flush=True)
         return fallback
+    print(f"[helper] [ollama_chat] [str(res)] {str(res)}", flush=True)
     return str(res)
 
 

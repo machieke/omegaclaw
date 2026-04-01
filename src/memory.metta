@@ -7,7 +7,8 @@
    (progn (println! "Initializing memory")
           (configure maxFeedback 800)
           (configure maxRecallItems 20)
-          (configure maxHistory 1200)))
+          (configure maxHistory 1200)
+          (py-call (helper.ensure_history_file (library mettaclaw ./memory/history.metta)))))
 
 (= (getPrompt)
    (read-file (library mettaclaw ./memory/prompt.txt)))
