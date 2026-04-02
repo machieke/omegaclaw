@@ -22,6 +22,14 @@ except Exception:
         sys.path.append(here)
     import auth_runtime
 
+try:
+    import capability_policy
+except Exception:
+    here = os.path.dirname(__file__)
+    if here and here not in sys.path:
+        sys.path.append(here)
+    import capability_policy
+
 _ENSURED_MODELS = set()
 _PREWARMED_MODELS = set()
 _OLLAMA_CLIENT = None
@@ -88,6 +96,55 @@ _USE_CHANNEL_RE = re.compile(
     r"^\s*use\s+(irc|mattermost|telegram|discord|slack)\s+channel\s*\??\s*$",
     re.IGNORECASE,
 )
+_POLICY_SHOW_RE = re.compile(r"^\s*policy\s+show\s*\??\s*$", re.IGNORECASE)
+_POLICY_RULE_RE = re.compile(
+    r"^\s*policy\s+(allow|deny|unallow|undeny)\s+([a-z0-9_./-]+)\s+([a-z0-9_./*-]+)\s*$",
+    re.IGNORECASE,
+)
+_POLICY_ROLE_RE = re.compile(
+    r"^\s*policy\s+role\s+([a-z0-9_.-]+)\s+([a-z0-9_./-]+)\s*$",
+    re.IGNORECASE,
+)
+_POLICY_UNROLE_RE = re.compile(
+    r"^\s*policy\s+unrole\s+([a-z0-9_.-]+)\s*$",
+    re.IGNORECASE,
+)
+_POLICY_SET_ROLE_ADMIN_RE = re.compile(
+    r"^\s*policy\s+set-role-admin\s+([a-z0-9_./-]+)\s+([a-z0-9_./-]+)\s*$",
+    re.IGNORECASE,
+)
+_POLICY_UNSET_ROLE_ADMIN_RE = re.compile(
+    r"^\s*policy\s+unset-role-admin\s+([a-z0-9_./-]+)\s+([a-z0-9_./-]+)\s*$",
+    re.IGNORECASE,
+)
+_POLICY_SET_POLICY_ADMIN_RE = re.compile(
+    r"^\s*policy\s+set-policy-admin\s+([a-z0-9_./*-]+)\s+([a-z0-9_./-]+)\s*$",
+    re.IGNORECASE,
+)
+_POLICY_UNSET_POLICY_ADMIN_RE = re.compile(
+    r"^\s*policy\s+unset-policy-admin\s+([a-z0-9_./*-]+)\s+([a-z0-9_./-]+)\s*$",
+    re.IGNORECASE,
+)
+_POLICY_GRANT_USER_RE = re.compile(
+    r"^\s*grant(?:\s+user)?\s+([a-z0-9_.-]+)\s+([a-z0-9_./-]+)\s*$",
+    re.IGNORECASE,
+)
+_POLICY_REVOKE_USER_RE = re.compile(
+    r"^\s*revoke(?:\s+user)?\s+([a-z0-9_.-]+)\s*$",
+    re.IGNORECASE,
+)
+_POLICY_GRANT_CAP_RE = re.compile(
+    r"^\s*grant\s+role\s+([a-z0-9_./-]+)\s+([a-z0-9_./*-]+)\s*$",
+    re.IGNORECASE,
+)
+_POLICY_REVOKE_CAP_RE = re.compile(
+    r"^\s*revoke\s+role\s+([a-z0-9_./-]+)\s+([a-z0-9_./*-]+)\s*$",
+    re.IGNORECASE,
+)
+_POLICY_RENOUNCE_ROLE_RE = re.compile(
+    r"^\s*(?:policy\s+)?renounce\s+role\s*$",
+    re.IGNORECASE,
+)
 _SEARCH_RESULT_ITEM_RE = re.compile(r"\(TITLE:\s*(.*?)\s+SNIPPET:\s*(.*?)\)\s*", re.DOTALL)
 _ASYNC_DISPATCH_LOCK = threading.Lock()
 _ASYNC_DISPATCH_EXECUTOR = None
@@ -102,6 +159,9 @@ _ACTIVE_COMMCHANNEL = str(os.getenv("METTACLAW_COMMCHANNEL", "irc") or "").strip
 _IDLE_QUERY_LOCK = threading.Lock()
 _LAST_IDLE_QUERY = ""
 _LAST_IDLE_QUERY_COUNT = 0
+_CAPABILITY_POLICY_LOCK = threading.Lock()
+_CAPABILITY_POLICY_READY = False
+_CAPABILITY_POLICY_ENGINE = None
 
 
 def _balanced_parentheses(text):
@@ -769,6 +829,10 @@ def _ensure_backend_started(channel):
         running = bool(getattr(backend, "_running", False))
         connected = bool(backend.is_connected()) if hasattr(backend, "is_connected") else False
         if running or connected:
+            try:
+                _sync_policy_agent_trusted_user_for_channel(target)
+            except Exception:
+                pass
             return True
         irc_channel = str(os.getenv("IRC_CHANNEL", "") or getattr(backend, "_channel", "") or "#purpleclaw").strip()
         server = str(os.getenv("IRC_SERVER", "") or getattr(backend, "_server", "") or "irc.quakenet.org").strip()
@@ -785,6 +849,10 @@ def _ensure_backend_started(channel):
             nick = "purpleclaw"
         try:
             backend.start_irc(irc_channel, server, port, nick)
+            try:
+                _sync_policy_agent_trusted_user_for_channel(target)
+            except Exception:
+                pass
             return True
         except Exception:
             return False
@@ -900,8 +968,17 @@ def _join_channel_skill_from_user_message(user_msg):
     replies = []
     irc_backend = _load_irc_backend()
     for part in _extract_user_parts(user_msg):
-        channel = _parse_join_channel_target(_strip_user_prefix(part))
+        sender, body = _split_sender_and_text(part)
+        actor = str(sender or "").strip() or "unknown"
+        commchannel = _get_active_commchannel()
+        channel = _parse_join_channel_target(body)
         if not channel:
+            continue
+        decision = _policy_decide_for_actor("join-channel", actor, commchannel, target=channel)
+        if not decision.allowed:
+            replies.append(_policy_denied_reply(decision, _int_env("METTACLAW_MAX_SEND_CHARS", 280), actor=actor))
+            if len(replies) >= 3:
+                break
             continue
         joined = False
         if irc_backend is not None and hasattr(irc_backend, "join_channel"):
@@ -925,8 +1002,17 @@ def _leave_channel_skill_from_user_message(user_msg):
     replies = []
     irc_backend = _load_irc_backend()
     for part in _extract_user_parts(user_msg):
-        channel = _parse_leave_channel_target(_strip_user_prefix(part))
+        sender, body = _split_sender_and_text(part)
+        actor = str(sender or "").strip() or "unknown"
+        commchannel = _get_active_commchannel()
+        channel = _parse_leave_channel_target(body)
         if not channel:
+            continue
+        decision = _policy_decide_for_actor("leave-channel", actor, commchannel, target=channel)
+        if not decision.allowed:
+            replies.append(_policy_denied_reply(decision, _int_env("METTACLAW_MAX_SEND_CHARS", 280), actor=actor))
+            if len(replies) >= 3:
+                break
             continue
         left = False
         if irc_backend is not None and hasattr(irc_backend, "leave_channel"):
@@ -950,11 +1036,20 @@ def _model_control_skill_from_user_message(user_msg, max_send_chars):
     replies = []
     names = []
     for part in _extract_user_parts(user_msg):
-        msg = _decode_special_tokens(_strip_user_prefix(part)).strip()
+        sender, body = _split_sender_and_text(part)
+        actor = str(sender or "").strip() or "unknown"
+        commchannel = _get_active_commchannel()
+        msg = _decode_special_tokens(body).strip()
         if not msg:
             continue
         use_match = _USE_MODEL_RE.match(msg)
         if use_match:
+            decision = _policy_decide_for_actor("use-model", actor, commchannel, target=msg)
+            if not decision.allowed:
+                replies.append(_policy_denied_reply(decision, max_send_chars, actor=actor))
+                if len(replies) >= 3:
+                    break
+                continue
             requested = use_match.group(1).strip().strip('"').strip("'").rstrip(".!?")
             if not names:
                 names = _available_model_names()
@@ -971,6 +1066,12 @@ def _model_control_skill_from_user_message(user_msg, max_send_chars):
                 replies.append(_shorten_text(reply, max_send_chars))
             continue
         if _CURRENT_MODEL_RE.match(msg):
+            decision = _policy_decide_for_actor("current-model", actor, commchannel, target=msg)
+            if not decision.allowed:
+                replies.append(_policy_denied_reply(decision, max_send_chars, actor=actor))
+                if len(replies) >= 3:
+                    break
+                continue
             current = _get_active_chat_model("")
             replies.append(_shorten_text(f"Current model is {current}.", max_send_chars))
     if not replies:
@@ -982,8 +1083,17 @@ def _model_control_skill_from_user_message(user_msg, max_send_chars):
 def _model_list_skill_from_user_message(user_msg, max_send_chars):
     replies = []
     for part in _extract_user_parts(user_msg):
-        msg = _trim_user_text(_strip_user_prefix(part))
+        sender, body = _split_sender_and_text(part)
+        actor = str(sender or "").strip() or "unknown"
+        commchannel = _get_active_commchannel()
+        msg = _trim_user_text(body)
         if not _MODEL_LIST_RE.search(msg):
+            continue
+        decision = _policy_decide_for_actor("list-models", actor, commchannel, target=msg)
+        if not decision.allowed:
+            replies.append(_policy_denied_reply(decision, max_send_chars, actor=actor))
+            if len(replies) >= 3:
+                break
             continue
         try:
             names = _available_model_names()
@@ -1005,8 +1115,17 @@ def _model_list_skill_from_user_message(user_msg, max_send_chars):
 def _channel_list_skill_from_user_message(user_msg, max_send_chars):
     replies = []
     for part in _extract_user_parts(user_msg):
-        msg = _decode_special_tokens(_strip_user_prefix(part)).strip()
+        sender, body = _split_sender_and_text(part)
+        actor = str(sender or "").strip() or "unknown"
+        commchannel = _get_active_commchannel()
+        msg = _decode_special_tokens(body).strip()
         if not _CHANNEL_LIST_RE.match(msg):
+            continue
+        decision = _policy_decide_for_actor("list-channels", actor, commchannel, target=msg)
+        if not decision.allowed:
+            replies.append(_policy_denied_reply(decision, max_send_chars, actor=actor))
+            if len(replies) >= 3:
+                break
             continue
         replies.append(_shorten_text("Supported channels: irc, mattermost, telegram, discord, slack", max_send_chars))
         if len(replies) >= 3:
@@ -1020,13 +1139,28 @@ def _channel_list_skill_from_user_message(user_msg, max_send_chars):
 def _commchannel_skill_from_user_message(user_msg, max_send_chars):
     replies = []
     for part in _extract_user_parts(user_msg):
-        msg = _decode_special_tokens(_strip_user_prefix(part)).strip()
+        sender, body = _split_sender_and_text(part)
+        actor = str(sender or "").strip() or "unknown"
+        commchannel = _get_active_commchannel()
+        msg = _decode_special_tokens(body).strip()
         if _SHOW_CURRENT_CHANNEL_RE.match(msg):
+            decision = _policy_decide_for_actor("show-current-channel", actor, commchannel, target=msg)
+            if not decision.allowed:
+                replies.append(_policy_denied_reply(decision, max_send_chars, actor=actor))
+                if len(replies) >= 3:
+                    break
+                continue
             current = _get_active_commchannel()
             replies.append(_shorten_text(f"Current commchannel is {current}.", max_send_chars))
         else:
             use_match = _USE_CHANNEL_RE.match(msg)
             if use_match:
+                decision = _policy_decide_for_actor("use-channel", actor, commchannel, target=msg)
+                if not decision.allowed:
+                    replies.append(_policy_denied_reply(decision, max_send_chars, actor=actor))
+                    if len(replies) >= 3:
+                        break
+                    continue
                 target = _normalize_commchannel(use_match.group(1))
                 if target and _set_active_commchannel(target):
                     _ensure_backend_started(target)
@@ -1045,7 +1179,25 @@ def _commchannel_skill_from_user_message(user_msg, max_send_chars):
 def _channel_config_skill_from_user_message(user_msg, max_send_chars):
     replies = []
     for part in _extract_user_parts(user_msg):
-        msg = _decode_special_tokens(_strip_user_prefix(part)).strip()
+        sender, body = _split_sender_and_text(part)
+        actor = str(sender or "").strip() or "unknown"
+        commchannel = _get_active_commchannel()
+        msg = _decode_special_tokens(body).strip()
+        matched = (
+            _SHOW_IRC_CONFIG_RE.match(msg)
+            or _SHOW_MM_CONFIG_RE.match(msg)
+            or _SHOW_TG_CONFIG_RE.match(msg)
+            or _SHOW_DISCORD_CONFIG_RE.match(msg)
+            or _SHOW_SLACK_CONFIG_RE.match(msg)
+        )
+        if not matched:
+            continue
+        decision = _policy_decide_for_actor("show-channel-config", actor, commchannel, target=msg)
+        if not decision.allowed:
+            replies.append(_policy_denied_reply(decision, max_send_chars, actor=actor))
+            if len(replies) >= 3:
+                break
+            continue
         if _SHOW_IRC_CONFIG_RE.match(msg):
             irc_backend = _load_irc_backend()
             cfg = {}
@@ -1211,6 +1363,9 @@ def _best_search_snippet(query, raw):
 
 
 def _tool_skill_from_user_message(user_msg, max_send_chars):
+    policy_cmd = _policy_control_skill_from_user_message(user_msg, max_send_chars)
+    if policy_cmd is not None:
+        return policy_cmd
     join_cmd = _join_channel_skill_from_user_message(user_msg)
     if join_cmd is not None:
         return join_cmd
@@ -1237,9 +1392,18 @@ def _tool_skill_from_user_message(user_msg, max_send_chars):
         return None
     replies = []
     for part in _extract_user_parts(user_msg):
-        msg = _trim_user_text(_strip_user_prefix(part))
+        sender, body = _split_sender_and_text(part)
+        actor = str(sender or "").strip() or "unknown"
+        commchannel = _get_active_commchannel()
+        msg = _trim_user_text(body)
         query = _search_query_from_message(msg)
         if query is None:
+            continue
+        decision = _policy_decide_for_actor("search", actor, commchannel, target=query)
+        if not decision.allowed:
+            replies.append(_policy_denied_reply(decision, max_send_chars, actor=actor))
+            if len(replies) >= 3:
+                break
             continue
         try:
             raw = backend.search(query, 5)
@@ -1264,6 +1428,10 @@ def _remember_user_likes(user_msg):
     for part in _extract_user_parts(user_msg):
         sender, msg = _split_sender_and_text(part)
         if not sender:
+            continue
+        commchannel = _get_active_commchannel()
+        remember_decision = _policy_decide_for_actor("remember", sender, commchannel, target=msg)
+        if not remember_decision.allowed:
             continue
         match = _LIKE_STMT_RE.match(msg)
         if match:
@@ -1303,6 +1471,11 @@ def _recall_user_likes(user_msg, max_send_chars):
         sender, msg = _split_sender_and_text(part)
         if not sender:
             continue
+        commchannel = _get_active_commchannel()
+        query_decision = _policy_decide_for_actor("query", sender, commchannel, target=msg)
+        if not query_decision.allowed:
+            reply = _policy_denied_reply(query_decision, max_send_chars, actor=sender)
+            return f"((send {_json_quote(reply)}))"
         status_query = _parse_status_query(msg)
         if status_query is not None:
             status_subject, asked_state = status_query
@@ -1531,6 +1704,388 @@ def _json_quote(text):
     return json.dumps(str(text), ensure_ascii=False)
 
 
+def _ensure_capability_policy_ready():
+    global _CAPABILITY_POLICY_READY, _CAPABILITY_POLICY_ENGINE
+    with _CAPABILITY_POLICY_LOCK:
+        if _CAPABILITY_POLICY_READY and _CAPABILITY_POLICY_ENGINE is not None:
+            return _CAPABILITY_POLICY_ENGINE
+        engine = capability_policy.get_engine()
+        registrations = [
+            ("remember", "Write to long-term memory", True),
+            ("query", "Query long-term memory", False),
+            ("pin", "Pin short-term state", False),
+            ("shell", "Execute shell command", True),
+            ("read-file", "Read file content", False),
+            ("write-file", "Write file content", True),
+            ("append-file", "Append file content", True),
+            ("send", "Send outbound message", True),
+            ("search", "Search the web", True),
+            ("metta", "Execute MeTTa expression", True),
+            ("join-channel", "Join IRC channel", True),
+            ("join", "Alias for join-channel", True),
+            ("leave-channel", "Leave IRC channel", True),
+            ("leave", "Alias for leave-channel", True),
+            ("list-models", "List available local models", False),
+            ("use-model", "Switch active model", True),
+            ("current-model", "Read active model", False),
+            ("list-channels", "List supported channels", False),
+            ("show-channel-config", "Show channel config summary", False),
+            ("use-channel", "Switch active commchannel", True),
+            ("show-current-channel", "Show active commchannel", False),
+            ("role-admin", "Mutate role assignments", True),
+            ("policy-admin", "Mutate policy rules and admin mappings", True),
+        ]
+        for name, desc, side_effecting in registrations:
+            engine.register_capability(
+                capability_policy.CapabilityDefinition(
+                    name=name,
+                    description=desc,
+                    side_effecting=bool(side_effecting),
+                )
+            )
+        _CAPABILITY_POLICY_ENGINE = engine
+        _CAPABILITY_POLICY_READY = True
+        return engine
+
+
+def _fallback_policy_actor(channel):
+    commchannel = _normalize_commchannel(channel)
+    if commchannel == "irc":
+        irc_backend = _load_irc_backend()
+        if irc_backend is not None and hasattr(irc_backend, "get_config"):
+            try:
+                cfg = irc_backend.get_config() or {}
+            except Exception:
+                cfg = {}
+            nick = str((cfg or {}).get("nick") or "").strip()
+            if nick:
+                return nick
+    return ""
+
+
+def _policy_actor_and_channel(user_msg):
+    sender = ""
+    for part in _extract_user_parts(user_msg):
+        who, _ = _split_sender_and_text(part)
+        if who:
+            sender = who
+            break
+    channel = _get_active_commchannel()
+    actor = sender.strip() or _fallback_policy_actor(channel) or "unknown"
+    return actor, channel
+
+
+def _policy_decide_for_actor(capability_name, actor, channel, target=""):
+    engine = _ensure_capability_policy_ready()
+    return engine.decide(
+        str(capability_name or ""),
+        actor=str(actor or ""),
+        channel=str(channel or ""),
+        target=str(target or ""),
+    )
+
+
+def _policy_decide(capability_name, user_msg="", target=""):
+    actor, channel = _policy_actor_and_channel(user_msg)
+    return _policy_decide_for_actor(capability_name, actor, channel, target=target)
+
+
+def _policy_denied_reply(decision, max_send_chars, actor="unknown"):
+    actor_name = str(actor or "").strip() or "unknown"
+    text = (
+        f"Policy denied capability '{decision.capability}' for user '{actor_name}' with role '{decision.role}' "
+        f"({decision.reason})."
+    )
+    return _shorten_text(text, max_send_chars)
+
+
+def _extract_top_level_skill_commands(skill_text):
+    text = str(skill_text or "").strip()
+    if not text or not text.startswith("("):
+        return []
+    commands = []
+    depth = 0
+    start = None
+    in_string = False
+    escaped = False
+    for idx, ch in enumerate(text):
+        if in_string:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_string = False
+            continue
+        if ch == '"':
+            in_string = True
+            continue
+        if ch == "(":
+            depth += 1
+            if depth == 2:
+                start = idx
+            continue
+        if ch == ")":
+            if depth == 2 and start is not None:
+                commands.append(text[start : idx + 1])
+                start = None
+            depth -= 1
+            if depth < 0:
+                break
+    return commands
+
+
+def _skill_capability_name(command_text):
+    match = re.match(r"^\(\s*([^\s()]+)", str(command_text or "").strip())
+    if match is None:
+        return ""
+    return str(match.group(1) or "").strip().lower()
+
+
+def _enforce_capability_policy(skill_text, user_msg="", max_send_chars=280):
+    text = str(skill_text or "").strip()
+    if not text:
+        return text
+    if not _looks_like_skill_output(text):
+        return text
+    commands = _extract_top_level_skill_commands(text)
+    if not commands:
+        return text
+    actor, channel = _policy_actor_and_channel(user_msg)
+    allowed = []
+    denied = []
+    for command in commands:
+        capability_name = _skill_capability_name(command)
+        if not capability_name:
+            continue
+        decision = _policy_decide_for_actor(capability_name, actor, channel, target=command)
+        if decision.allowed:
+            allowed.append(command)
+        else:
+            denied.append(decision)
+    if not denied:
+        return text
+    send_decision = _policy_decide_for_actor("send", actor, channel, target="policy-denied-feedback")
+    if send_decision.allowed:
+        for decision in denied[:2]:
+            reply = _policy_denied_reply(decision, max_send_chars, actor=actor)
+            allowed.append(f"(send {_json_quote(reply)})")
+    if not allowed:
+        return "()"
+    return f"({' '.join(allowed)})"
+
+
+def _policy_control_skill_from_user_message(user_msg, max_send_chars):
+    replies = []
+    engine = _ensure_capability_policy_ready()
+    for part in _extract_user_parts(user_msg):
+        sender, body = _split_sender_and_text(part)
+        actor = str(sender or "").strip() or "unknown"
+        channel = _get_active_commchannel()
+        msg = _decode_special_tokens(body).strip()
+        if not msg:
+            continue
+        if _POLICY_SHOW_RE.match(msg):
+            summary = engine.describe_policy(actor=actor, channel=channel)
+            replies.append(_shorten_text(summary, max_send_chars))
+            if len(replies) >= 3:
+                break
+            continue
+        if _POLICY_RENOUNCE_ROLE_RE.match(msg):
+            ok, info = engine.mutate_dynamic_policy(
+                actor=actor,
+                channel=channel,
+                action="renounce-role",
+            )
+            prefix = "Policy updated: " if ok else "Policy update denied: "
+            replies.append(_shorten_text(prefix + str(info), max_send_chars))
+            if len(replies) >= 3:
+                break
+            continue
+        set_policy_admin_match = _POLICY_SET_POLICY_ADMIN_RE.match(msg)
+        if set_policy_admin_match is not None:
+            target_role = set_policy_admin_match.group(1).strip().lower()
+            admin_role = set_policy_admin_match.group(2).strip().lower()
+            ok, info = engine.mutate_dynamic_policy(
+                actor=actor,
+                channel=channel,
+                action="set-policy-admin",
+                role=target_role,
+                capability=admin_role,
+            )
+            prefix = "Policy updated: " if ok else "Policy update denied: "
+            replies.append(_shorten_text(prefix + str(info), max_send_chars))
+            if len(replies) >= 3:
+                break
+            continue
+        unset_policy_admin_match = _POLICY_UNSET_POLICY_ADMIN_RE.match(msg)
+        if unset_policy_admin_match is not None:
+            target_role = unset_policy_admin_match.group(1).strip().lower()
+            admin_role = unset_policy_admin_match.group(2).strip().lower()
+            ok, info = engine.mutate_dynamic_policy(
+                actor=actor,
+                channel=channel,
+                action="unset-policy-admin",
+                role=target_role,
+                capability=admin_role,
+            )
+            prefix = "Policy updated: " if ok else "Policy update denied: "
+            replies.append(_shorten_text(prefix + str(info), max_send_chars))
+            if len(replies) >= 3:
+                break
+            continue
+        set_role_admin_match = _POLICY_SET_ROLE_ADMIN_RE.match(msg)
+        if set_role_admin_match is not None:
+            target_role = set_role_admin_match.group(1).strip().lower()
+            admin_role = set_role_admin_match.group(2).strip().lower()
+            ok, info = engine.mutate_dynamic_policy(
+                actor=actor,
+                channel=channel,
+                action="set-role-admin",
+                role=target_role,
+                capability=admin_role,
+            )
+            prefix = "Policy updated: " if ok else "Policy update denied: "
+            replies.append(_shorten_text(prefix + str(info), max_send_chars))
+            if len(replies) >= 3:
+                break
+            continue
+        unset_role_admin_match = _POLICY_UNSET_ROLE_ADMIN_RE.match(msg)
+        if unset_role_admin_match is not None:
+            target_role = unset_role_admin_match.group(1).strip().lower()
+            admin_role = unset_role_admin_match.group(2).strip().lower()
+            ok, info = engine.mutate_dynamic_policy(
+                actor=actor,
+                channel=channel,
+                action="unset-role-admin",
+                role=target_role,
+                capability=admin_role,
+            )
+            prefix = "Policy updated: " if ok else "Policy update denied: "
+            replies.append(_shorten_text(prefix + str(info), max_send_chars))
+            if len(replies) >= 3:
+                break
+            continue
+        grant_cap_match = _POLICY_GRANT_CAP_RE.match(msg)
+        if grant_cap_match is not None:
+            role = grant_cap_match.group(1).strip().lower()
+            capability_name = grant_cap_match.group(2).strip().lower()
+            ok, info = engine.mutate_dynamic_policy(
+                actor=actor,
+                channel=channel,
+                action="allow",
+                role=role,
+                capability=capability_name,
+            )
+            prefix = "Policy updated: " if ok else "Policy update denied: "
+            replies.append(_shorten_text(prefix + str(info), max_send_chars))
+            if len(replies) >= 3:
+                break
+            continue
+        revoke_cap_match = _POLICY_REVOKE_CAP_RE.match(msg)
+        if revoke_cap_match is not None:
+            role = revoke_cap_match.group(1).strip().lower()
+            capability_name = revoke_cap_match.group(2).strip().lower()
+            ok, info = engine.mutate_dynamic_policy(
+                actor=actor,
+                channel=channel,
+                action="unallow",
+                role=role,
+                capability=capability_name,
+            )
+            prefix = "Policy updated: " if ok else "Policy update denied: "
+            replies.append(_shorten_text(prefix + str(info), max_send_chars))
+            if len(replies) >= 3:
+                break
+            continue
+        grant_user_match = _POLICY_GRANT_USER_RE.match(msg)
+        if grant_user_match is not None:
+            user_name = grant_user_match.group(1).strip().lower()
+            role_name = grant_user_match.group(2).strip().lower()
+            ok, info = engine.mutate_dynamic_policy(
+                actor=actor,
+                channel=channel,
+                action="set-role",
+                user=user_name,
+                role=role_name,
+            )
+            prefix = "Policy updated: " if ok else "Policy update denied: "
+            replies.append(_shorten_text(prefix + str(info), max_send_chars))
+            if len(replies) >= 3:
+                break
+            continue
+        revoke_user_match = _POLICY_REVOKE_USER_RE.match(msg)
+        if revoke_user_match is not None:
+            user_name = revoke_user_match.group(1).strip().lower()
+            ok, info = engine.mutate_dynamic_policy(
+                actor=actor,
+                channel=channel,
+                action="unset-role",
+                user=user_name,
+            )
+            prefix = "Policy updated: " if ok else "Policy update denied: "
+            replies.append(_shorten_text(prefix + str(info), max_send_chars))
+            if len(replies) >= 3:
+                break
+            continue
+        rule_match = _POLICY_RULE_RE.match(msg)
+        if rule_match is not None:
+            action = rule_match.group(1).strip().lower()
+            role = rule_match.group(2).strip().lower()
+            capability_name = rule_match.group(3).strip().lower()
+            ok, info = engine.mutate_dynamic_policy(
+                actor=actor,
+                channel=channel,
+                action=action,
+                role=role,
+                capability=capability_name,
+            )
+            prefix = "Policy updated: " if ok else "Policy update denied: "
+            replies.append(_shorten_text(prefix + str(info), max_send_chars))
+            if len(replies) >= 3:
+                break
+            continue
+        role_match = _POLICY_ROLE_RE.match(msg)
+        if role_match is not None:
+            user_name = role_match.group(1).strip().lower()
+            role_name = role_match.group(2).strip().lower()
+            ok, info = engine.mutate_dynamic_policy(
+                actor=actor,
+                channel=channel,
+                action="set-role",
+                user=user_name,
+                role=role_name,
+            )
+            prefix = "Policy updated: " if ok else "Policy update denied: "
+            replies.append(_shorten_text(prefix + str(info), max_send_chars))
+            if len(replies) >= 3:
+                break
+            continue
+        unrole_match = _POLICY_UNROLE_RE.match(msg)
+        if unrole_match is not None:
+            user_name = unrole_match.group(1).strip().lower()
+            ok, info = engine.mutate_dynamic_policy(
+                actor=actor,
+                channel=channel,
+                action="unset-role",
+                user=user_name,
+            )
+            prefix = "Policy updated: " if ok else "Policy update denied: "
+            replies.append(_shorten_text(prefix + str(info), max_send_chars))
+            if len(replies) >= 3:
+                break
+            continue
+    if not replies:
+        return None
+    cmds = " ".join(f"(send {_json_quote(reply)})" for reply in replies[:3])
+    return f"({cmds})"
+
+
+def _configure_capability_policy_runtime():
+    _ensure_capability_policy_ready()
+    _sync_policy_agent_trusted_user_for_channel(_get_active_commchannel())
+
+
 def _configure_auth_runtime():
     auth_runtime.configure(
         is_true_fn=_is_true,
@@ -1548,8 +2103,72 @@ def _announce_auth_notice(channel):
     return bool(auth_runtime.announce_auth_notice(channel))
 
 
+def _sync_policy_agent_trusted_user_for_channel(channel):
+    channel_name = _normalize_commchannel(channel)
+    if not channel_name:
+        return
+    if channel_name == "irc":
+        irc_backend = _load_irc_backend()
+        cfg = {}
+        if irc_backend is not None and hasattr(irc_backend, "get_config"):
+            try:
+                cfg = irc_backend.get_config() or {}
+            except Exception:
+                cfg = {}
+        running = bool((cfg or {}).get("running"))
+        connected = bool((cfg or {}).get("connected"))
+        if not running and not connected:
+            return
+    actor_name = str(_fallback_policy_actor(channel_name) or "").strip()
+    if not actor_name:
+        return
+    try:
+        engine = _ensure_capability_policy_ready()
+    except Exception:
+        return
+    current_role = ""
+    try:
+        with engine._lock:
+            current_role = str(engine._actor_role_unlocked(actor_name, channel_name) or "").strip().lower()
+    except Exception:
+        current_role = ""
+    if current_role == "trusted-user":
+        return
+    try:
+        engine.mutate_dynamic_policy(
+            actor=actor_name,
+            channel=channel_name,
+            action="bootstrap-secret-admin",
+            user=actor_name,
+            role="trusted-user",
+        )
+    except Exception:
+        pass
+
+
+def _sync_policy_bootstrap_admin_from_auth():
+    user, channel = auth_runtime.consume_registration_event()
+    user_name = str(user or "").strip()
+    channel_name = _normalize_commchannel(channel)
+    if not user_name or not channel_name:
+        return
+    try:
+        engine = _ensure_capability_policy_ready()
+        engine.mutate_dynamic_policy(
+            actor=user_name,
+            channel=channel_name,
+            action="bootstrap-secret-admin",
+            user=user_name,
+            role="trusted-admin",
+        )
+    except Exception:
+        pass
+
+
 def _filter_incoming_by_auth(raw_msg, source_channel):
-    return auth_runtime.filter_incoming_by_auth(raw_msg, source_channel)
+    filtered = auth_runtime.filter_incoming_by_auth(raw_msg, source_channel)
+    _sync_policy_bootstrap_admin_from_auth()
+    return filtered
 
 
 def _bootstrap_auth_state():
@@ -1841,7 +2460,7 @@ def normalize_skill_output(s, user_msg="", msg_new=False, max_send_chars=None, s
 
     memory_reply = _recall_user_likes(user_msg, max_send_chars)
     if memory_reply is not None:
-        return memory_reply
+        return _enforce_capability_policy(memory_reply, user_msg=user_msg, max_send_chars=max_send_chars)
     _remember_user_likes(user_msg)
 
     text = str(s or "").strip()
@@ -1854,6 +2473,7 @@ def normalize_skill_output(s, user_msg="", msg_new=False, max_send_chars=None, s
     # keep it and just normalize parenthesis framing.
     if _looks_like_skill_output(text):
         normalized = _clamp_send_payloads(balance_parentheses(text), max_send_chars)
+        normalized = _enforce_capability_policy(normalized, user_msg=user_msg, max_send_chars=max_send_chars)
         if not _is_meta_skill_output(normalized):
             return normalized
 
@@ -1861,7 +2481,7 @@ def normalize_skill_output(s, user_msg="", msg_new=False, max_send_chars=None, s
     # malformed, empty, or meta/self-referential.
     direct = _direct_skill_from_user_message(user_msg, max_send_chars)
     if direct is not None:
-        return direct
+        return _enforce_capability_policy(direct, user_msg=user_msg, max_send_chars=max_send_chars)
 
     if not text:
         return "()"
@@ -1872,7 +2492,8 @@ def normalize_skill_output(s, user_msg="", msg_new=False, max_send_chars=None, s
     cleaned = _trim_incomplete_tail(shortened)
     if not cleaned:
         cleaned = shortened
-    return f"((send {_json_quote(cleaned)}))"
+    fallback = f"((send {_json_quote(cleaned)}))"
+    return _enforce_capability_policy(fallback, user_msg=user_msg, max_send_chars=max_send_chars)
 
 
 def _ollama_base_url():
@@ -2342,6 +2963,11 @@ try:
     _start_background_prewarm()
 except Exception:
     pass
+
+try:
+    _configure_capability_policy_runtime()
+except Exception as exc:
+    print(f"[policy] configure failed: {exc}", flush=True)
 
 try:
     _configure_auth_runtime()

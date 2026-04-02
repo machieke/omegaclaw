@@ -76,6 +76,41 @@ Default local-LLM wiring:
 - If your host UID/GID is not `1000:1000`, set:
   `METTACLAW_UID=$(id -u) METTACLAW_GID=$(id -g) docker compose up --build`
 
+Capability policy enforcement:
+- Capabilities register into a shared policy interface at startup.
+- Policy evaluation is applied before capability execution (default-deny for non-allowed capabilities).
+- Static roles file: `memory/capability_roles_static.metta`
+- Dynamic roles file: `memory/capability_roles_dynamic.metta` (runtime-managed)
+- Static policies file: `memory/capability_policies_static.metta`
+- Dynamic policies file: `memory/capability_policies_dynamic.metta` (runtime-managed)
+- Files are persisted/loaded as MeTTa expressions (not JSON blobs), for example:
+  - `(user-role "alice" "trusted-admin")`
+  - `(channel-user-role "irc" "bob" "trusted-user")`
+  - `(role-capability "trusted-user" "query")`
+  - `(policy-admin "*" "trusted-admin")`
+- No automatic role grant is applied to all channel users by default (`channel_roles` is empty unless explicitly configured).
+- Configure role-admin scope in `role_admin_roles` (map of target role -> admin roles; `*` applies to all roles).
+- Configure policy-admin scope in `policy_admin_roles` (map of target policy role -> admin roles; `*` applies to all policy roles).
+- Startup bootstrap: a one-time auth secret is generated; the first user who posts it in a channel is granted `trusted-admin` in that channel only.
+- Admin-capable users can mutate dynamic roles/policies via channel commands:
+  - `policy show`
+  - `policy allow <role> <capability>`
+  - `policy deny <role> <capability>`
+  - `policy unallow <role> <capability>`
+  - `policy undeny <role> <capability>`
+  - `policy role <user> <role>` (grants role in current channel only)
+  - `policy unrole <user>` (revokes role in current channel only)
+  - `policy set-policy-admin <target-role> <admin-role>` (for target policy role)
+  - `policy unset-policy-admin <target-role> <admin-role>` (for target policy role)
+  - `policy set-role-admin <target-role> <admin-role>` (for target role)
+  - `policy unset-role-admin <target-role> <admin-role>` (for target role)
+  - `grant <user> <role>` (alias for `policy role`, channel-scoped)
+  - `revoke <user>` (alias for `policy unrole`, channel-scoped)
+  - `renounce role` (drop your own dynamic role)
+  - `grant role <role> <capability>` (alias for `policy allow`)
+  - `revoke role <role> <capability>` (alias for `policy unallow`)
+  - `revoke <user>` / `policy unrole <user>` cannot target yourself; use `renounce role` instead
+
 **Auto-install/run**
 
 Alternatively, if PeTTa is already installed and the latest version pulled (v1.0.2 or latest commit), then running the following MeTTa file from the root folder installs and runs MeTTaClaw (assuming a reachable Ollama instance):

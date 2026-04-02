@@ -124,6 +124,32 @@ def _dedupe_window_ms():
     return value
 
 
+def _connect_timeout_s():
+    raw = os.getenv("IRC_CONNECT_TIMEOUT_S", "20").strip()
+    try:
+        value = float(raw)
+    except ValueError:
+        value = 20.0
+    if value < 3.0:
+        return 3.0
+    if value > 120.0:
+        return 120.0
+    return value
+
+
+def _reconnect_delay_s():
+    raw = os.getenv("IRC_RECONNECT_DELAY_S", "5").strip()
+    try:
+        value = float(raw)
+    except ValueError:
+        value = 5.0
+    if value < 1.0:
+        return 1.0
+    if value > 120.0:
+        return 120.0
+    return value
+
+
 def _split_outgoing_chunks(text, max_len):
     content = " ".join(str(text or "").split()).strip()
     if not content:
@@ -277,53 +303,63 @@ def is_connected():
 
 def _irc_loop(channel, server, port, nick):
     global _running, _sock, _connected
-    sock = None
-    try:
-        sock = socket.socket()
-        sock.connect((server, port))
-        _sock = sock
-        _log(f"connected to {server}:{port} as {nick}")
-        _send(f"NICK {nick}")
-        _send(f"USER {nick} 0 * :{nick}")
+    while _running:
+        sock = None
+        try:
+            sock = socket.socket()
+            sock.settimeout(_connect_timeout_s())
+            sock.connect((server, port))
+            sock.settimeout(None)
+            _sock = sock
+            _log(f"connected to {server}:{port} as {nick}")
+            _send(f"NICK {nick}")
+            _send(f"USER {nick} 0 * :{nick}")
 
-        while _running:
-            try:
-                data = sock.recv(4096).decode(errors="ignore")
-            except OSError as exc:
-                _log(f"socket recv error: {exc}")
-                break
+            while _running:
+                try:
+                    data = sock.recv(4096).decode(errors="ignore")
+                except OSError as exc:
+                    _log(f"socket recv error: {exc}")
+                    break
 
-            for line in data.split("\r\n"):
-                if not line:
-                    continue
-                if line.startswith("PING"):
-                    _send(f"PONG {line.split()[1]}")
-                parts = line.split()
-                if len(parts) > 1 and parts[1] == "001":
-                    _connected = True
-                    _send(f"JOIN {_channel}")
-                    _log(f"authenticated, joining {_channel}")
-                elif line.startswith(":") and " JOIN " in line and f":{nick}!" in line:
-                    _log(f"joined {_channel}")
-                elif line.startswith(":") and " PRIVMSG " in line:
-                    try:
-                        prefix, trailing = line[1:].split(" PRIVMSG ", 1)
-                        sender = prefix.split("!", 1)[0]
-                        if " :" not in trailing:
-                            continue
-                        target, msg = trailing.split(" :", 1)
-                        _set_last(f"{sender}: {msg}", target.split()[0].strip())
-                    except Exception as exc:
-                        _log(f"message parse error: {exc}")
-    except Exception as exc:
-        _log(f"connection error: {exc}")
-    finally:
-        _connected = False
-        with _sock_lock:
-            _sock = None
-        if sock is not None:
-            sock.close()
-        _log("disconnected")
+                for line in data.split("\r\n"):
+                    if not line:
+                        continue
+                    if line.startswith("PING"):
+                        _send(f"PONG {line.split()[1]}")
+                    parts = line.split()
+                    if len(parts) > 1 and parts[1] == "001":
+                        _connected = True
+                        _send(f"JOIN {_channel}")
+                        _log(f"authenticated, joining {_channel}")
+                    elif line.startswith(":") and " JOIN " in line and f":{nick}!" in line:
+                        _log(f"joined {_channel}")
+                    elif line.startswith(":") and " PRIVMSG " in line:
+                        try:
+                            prefix, trailing = line[1:].split(" PRIVMSG ", 1)
+                            sender = prefix.split("!", 1)[0]
+                            if str(sender or "").strip().lower() == str(nick or "").strip().lower():
+                                # Ignore server echo of our own outbound messages to avoid self-feedback loops.
+                                continue
+                            if " :" not in trailing:
+                                continue
+                            target, msg = trailing.split(" :", 1)
+                            _set_last(f"{sender}: {msg}", target.split()[0].strip())
+                        except Exception as exc:
+                            _log(f"message parse error: {exc}")
+        except Exception as exc:
+            _log(f"connection error: {exc}")
+        finally:
+            _connected = False
+            with _sock_lock:
+                _sock = None
+            if sock is not None:
+                sock.close()
+            _log("disconnected")
+        if _running:
+            delay_s = _reconnect_delay_s()
+            _log(f"reconnecting in {delay_s:.1f}s")
+            time.sleep(delay_s)
 
 
 def start_irc(channel, server="irc.libera.chat", port=6667, nick="mettaclaw"):

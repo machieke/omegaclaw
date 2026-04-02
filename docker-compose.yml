@@ -84,6 +84,10 @@ services:
       TRACE_PERFORMANCE: ${TRACE_PERFORMANCE:-false}
       CHROMA_DB_PATH: ${CHROMA_DB_PATH:-/PeTTa/repos/mettaclaw/memory/chroma_db}
       CHROMA_COLLECTION: ${CHROMA_COLLECTION:-memories}
+      CAPABILITY_STATIC_ROLES_PATH: ${CAPABILITY_STATIC_ROLES_PATH:-/PeTTa/repos/mettaclaw/memory/capability_roles_static.metta}
+      CAPABILITY_DYNAMIC_ROLES_PATH: ${CAPABILITY_DYNAMIC_ROLES_PATH:-/PeTTa/repos/mettaclaw/memory/capability_roles_dynamic.metta}
+      CAPABILITY_STATIC_POLICIES_PATH: ${CAPABILITY_STATIC_POLICIES_PATH:-/PeTTa/repos/mettaclaw/memory/capability_policies_static.metta}
+      CAPABILITY_DYNAMIC_POLICIES_PATH: ${CAPABILITY_DYNAMIC_POLICIES_PATH:-/PeTTa/repos/mettaclaw/memory/capability_policies_dynamic.metta}
     # Run as non-root while matching host bind-mount ownership by default.
     user: "${METTACLAW_UID:-1000}:${METTACLAW_GID:-1000}"
     security_opt:

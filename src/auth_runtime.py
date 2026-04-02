@@ -27,6 +27,7 @@ _AUTH_REGISTERED_CHANNEL = ""
 _AUTH_REGISTERED_AT = ""
 _AUTH_NOTICE_POSTED = set()
 _AUTH_HINTED_SENDERS = {}
+_AUTH_REGISTRATION_EVENT = None
 
 
 def configure(
@@ -186,7 +187,7 @@ def _registered_sender():
 
 
 def _auth_notice_text():
-    return "Authentication required. Post startup secret as: auth <secret>"
+    return "Authentication required. Post startup secret as: auth <secret> (grants trusted-admin in this channel)"
 
 
 def _unwrap_secret_token(token):
@@ -273,7 +274,7 @@ def _should_send_auth_hint(sender):
 
 
 def _register_authenticated_user(sender, channel):
-    global _AUTH_REGISTERED_USER, _AUTH_REGISTERED_CHANNEL, _AUTH_REGISTERED_AT, _AUTH_SECRET
+    global _AUTH_REGISTERED_USER, _AUTH_REGISTERED_CHANNEL, _AUTH_REGISTERED_AT, _AUTH_SECRET, _AUTH_REGISTRATION_EVENT
     user = str(sender or "").strip()
     if not user:
         return False
@@ -285,9 +286,21 @@ def _register_authenticated_user(sender, channel):
         _AUTH_REGISTERED_CHANNEL = target
         _AUTH_REGISTERED_AT = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
         _AUTH_SECRET = ""
+        _AUTH_REGISTRATION_EVENT = (user, target)
     _dispatch_to_channel(target, f"Authenticated user registered: {user}.")
     _auth_log(f"registered authenticated user={user} channel={target} at={_AUTH_REGISTERED_AT}")
     return True
+
+
+def consume_registration_event():
+    global _AUTH_REGISTRATION_EVENT
+    with _AUTH_LOCK:
+        event = _AUTH_REGISTRATION_EVENT
+        _AUTH_REGISTRATION_EVENT = None
+    if not event:
+        return "", ""
+    user, channel = event
+    return str(user or "").strip(), str(channel or "").strip()
 
 
 def filter_incoming_by_auth(raw_msg, source_channel):
@@ -311,12 +324,7 @@ def filter_incoming_by_auth(raw_msg, source_channel):
 
         current = _registered_sender()
         if current:
-            if _normalize_sender(sender_name) == _normalize_sender(current):
-                accepted.append(item)
-            else:
-                _auth_log(f"ignored sender={sender_name} in channel={source} (registered={current})")
-                if _should_send_auth_hint(sender_name):
-                    _dispatch_to_channel(source, _auth_notice_text())
+            accepted.append(item)
             continue
 
         candidate = _extract_registration_token(body)
