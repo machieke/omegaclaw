@@ -90,6 +90,19 @@ Vibe voice channel + React frontend:
 - If `METTACLAW_AUTH_REQUIRED=true`, first send `auth <startup-secret>` from the UI (the secret is printed in `docker compose logs mettaclaw`).
 - Non-Docker runs need `fastapi` and `uvicorn` installed for the `vibe-voice` websocket server.
 
+Persona-driven system prompt:
+- Persona definitions now live in MeTTa-formatted files under `personas/`, for example `personas/system-thinking-strategist.metta`.
+- `getPrompt` composes `memory/prompt.txt` with the selected persona at runtime.
+- Defaults: `METTACLAW_PERSONA_ENABLED=true` and `METTACLAW_PERSONA_ID=system-thinking-strategist`.
+- Optional overrides:
+  - `METTACLAW_PERSONA_PATH` (absolute or relative path, supports `{persona_id}` template)
+  - `METTACLAW_PERSONA_SECTIONS` (comma-separated subset)
+  - `METTACLAW_PERSONA_MAX_CHARS` (caps injected persona size; `0` disables capping)
+- Runtime commands:
+  - `persona list`
+  - `persona current`
+  - `persona use <persona-id>`
+
 Capability policy enforcement:
 - Capabilities register into a shared policy interface at startup.
 - Policy evaluation is applied before capability execution (default-deny for non-allowed capabilities).

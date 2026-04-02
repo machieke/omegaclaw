@@ -11,7 +11,7 @@
           (py-call (helper.ensure_history_file (library mettaclaw ./memory/history.metta)))))
 
 (= (getPrompt)
-   (read-file (library mettaclaw ./memory/prompt.txt)))
+   (py-call (helper.build_system_prompt (read-file (library mettaclaw ./memory/prompt.txt)))))
 
 (= (getHistory)
    (let $ret (read-file (library mettaclaw ./memory/history.metta))
