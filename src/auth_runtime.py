@@ -5,7 +5,7 @@ import threading
 import time
 from datetime import datetime, timezone
 
-_SUPPORTED_COMMCHANNELS = ("irc", "mattermost", "telegram", "discord", "slack")
+_SUPPORTED_COMMCHANNELS = ("irc", "mattermost", "telegram", "discord", "slack", "vibe-voice")
 _AUTH_REGISTER_RE = re.compile(
     r"^\s*(?:auth(?:enticate)?|register)\s+(.+?)\s*$",
     re.IGNORECASE,
@@ -143,6 +143,8 @@ def _normalize_commchannel(name):
         except Exception:
             pass
     channel = str(name or "").strip().lower()
+    if channel in {"vibe", "voice", "vibevoice", "vibe_voice", "vibe-voice"}:
+        channel = "vibe-voice"
     if channel in _SUPPORTED_COMMCHANNELS:
         return channel
     return ""
@@ -156,7 +158,7 @@ def _get_active_commchannel():
                 return value
         except Exception:
             pass
-    fallback = str(os.getenv("METTACLAW_COMMCHANNEL", "irc") or "").strip().lower()
+    fallback = _normalize_commchannel(os.getenv("METTACLAW_COMMCHANNEL", "irc"))
     return fallback if fallback in _SUPPORTED_COMMCHANNELS else "irc"
 
 

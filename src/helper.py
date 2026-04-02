@@ -88,12 +88,13 @@ _SHOW_MM_CONFIG_RE = re.compile(
 _SHOW_TG_CONFIG_RE = re.compile(r"^\s*show\s+telegram\s+channel\s+config\s*\??\s*$", re.IGNORECASE)
 _SHOW_DISCORD_CONFIG_RE = re.compile(r"^\s*show\s+discord\s+channel\s+config\s*\??\s*$", re.IGNORECASE)
 _SHOW_SLACK_CONFIG_RE = re.compile(r"^\s*show\s+slack\s+channel\s+config\s*\??\s*$", re.IGNORECASE)
+_SHOW_VIBE_CONFIG_RE = re.compile(r"^\s*show\s+vibe(?:[-_\s]?voice)?\s+channel\s+config\s*\??\s*$", re.IGNORECASE)
 _SHOW_CURRENT_CHANNEL_RE = re.compile(
     r"^\s*(?:show|what(?:\s+is)?)\s+(?:the\s+)?current\s+channel\s*\??\s*$",
     re.IGNORECASE,
 )
 _USE_CHANNEL_RE = re.compile(
-    r"^\s*use\s+(irc|mattermost|telegram|discord|slack)\s+channel\s*\??\s*$",
+    r"^\s*use\s+(irc|mattermost|telegram|discord|slack|vibe(?:[-_]?voice)?|voice)\s+channel\s*\??\s*$",
     re.IGNORECASE,
 )
 _POLICY_SHOW_RE = re.compile(r"^\s*policy\s+show\s*\??\s*$", re.IGNORECASE)
@@ -153,7 +154,7 @@ _SENDER_LOCKS_LOCK = threading.Lock()
 _SENDER_LOCKS = {}
 _ACTIVE_CHAT_MODEL_LOCK = threading.Lock()
 _ACTIVE_CHAT_MODEL = ""
-_SUPPORTED_COMMCHANNELS = ("irc", "mattermost", "telegram", "discord", "slack")
+_SUPPORTED_COMMCHANNELS = ("irc", "mattermost", "telegram", "discord", "slack", "vibe-voice")
 _ACTIVE_COMMCHANNEL_LOCK = threading.Lock()
 _ACTIVE_COMMCHANNEL = str(os.getenv("METTACLAW_COMMCHANNEL", "irc") or "").strip().lower()
 _IDLE_QUERY_LOCK = threading.Lock()
@@ -578,6 +579,10 @@ def _load_slack_backend():
     return _load_channel_backend("slack")
 
 
+def _load_vibe_voice_backend():
+    return _load_channel_backend("vibe_voice")
+
+
 def _search_query_from_message(msg):
     text = str(msg or "").strip()
     if not text:
@@ -677,6 +682,8 @@ def _set_active_chat_model(model_name):
 
 def _normalize_commchannel(name):
     channel = str(name or "").strip().lower()
+    if channel in {"vibe", "voice", "vibevoice", "vibe_voice", "vibe-voice"}:
+        channel = "vibe-voice"
     if channel in _SUPPORTED_COMMCHANNELS:
         return channel
     return ""
@@ -744,6 +751,12 @@ def _channel_has_config(channel):
         token = _backend_attr_or_env(backend, "SLACK_BOT_TOKEN", "SLACK_BOT_TOKEN")
         channel_id = _backend_attr_or_env(backend, "SLACK_CHANNEL_ID", "SLACK_CHANNEL_ID")
         return bool(token and channel_id)
+    if target == "vibe-voice":
+        enabled = str(os.getenv("VIBE_VOICE_ENABLED", "") or "").strip().lower()
+        if enabled:
+            return enabled in {"1", "true", "yes", "on"}
+        requested = _normalize_commchannel(os.getenv("METTACLAW_COMMCHANNEL", ""))
+        return requested == "vibe-voice"
     return False
 
 
@@ -783,6 +796,8 @@ def _receive_from_channel(channel):
         backend = _load_discord_backend()
     elif target == "slack":
         backend = _load_slack_backend()
+    elif target == "vibe-voice":
+        backend = _load_vibe_voice_backend()
     else:
         backend = None
     if backend is None or not hasattr(backend, "getLastMessage"):
@@ -914,6 +929,43 @@ def _ensure_backend_started(channel):
         channel_id = str(os.getenv("SLACK_CHANNEL_ID", "") or getattr(backend, "SLACK_CHANNEL_ID", "")).strip()
         try:
             backend.start_slack(token, channel_id)
+            return True
+        except Exception:
+            return False
+    if target == "vibe-voice":
+        backend = _load_vibe_voice_backend()
+        if backend is None or not hasattr(backend, "start_vibe_voice"):
+            return False
+        running = bool(getattr(backend, "_running", False))
+        connected = bool(backend.is_connected()) if hasattr(backend, "is_connected") else False
+        if running or connected:
+            try:
+                _sync_policy_agent_trusted_user_for_channel(target)
+            except Exception:
+                pass
+            return True
+        host = str(os.getenv("VIBE_VOICE_HOST", "") or getattr(backend, "_host", "") or "0.0.0.0").strip()
+        port = _int_or_default(
+            os.getenv("VIBE_VOICE_PORT", ""),
+            _int_or_default(getattr(backend, "_port", ""), 8012),
+        )
+        default_user = str(
+            os.getenv("VIBE_VOICE_DEFAULT_USER", "")
+            or getattr(backend, "_default_user", "")
+            or "vibe-agent"
+        ).strip()
+        if not host:
+            host = "0.0.0.0"
+        if port <= 0:
+            port = 8012
+        if not default_user:
+            default_user = "vibe-agent"
+        try:
+            backend.start_vibe_voice(host, port, default_user)
+            try:
+                _sync_policy_agent_trusted_user_for_channel(target)
+            except Exception:
+                pass
             return True
         except Exception:
             return False
@@ -1127,7 +1179,12 @@ def _channel_list_skill_from_user_message(user_msg, max_send_chars):
             if len(replies) >= 3:
                 break
             continue
-        replies.append(_shorten_text("Supported channels: irc, mattermost, telegram, discord, slack", max_send_chars))
+        replies.append(
+            _shorten_text(
+                "Supported channels: irc, mattermost, telegram, discord, slack, vibe-voice",
+                max_send_chars,
+            )
+        )
         if len(replies) >= 3:
             break
     if not replies:
@@ -1189,6 +1246,7 @@ def _channel_config_skill_from_user_message(user_msg, max_send_chars):
             or _SHOW_TG_CONFIG_RE.match(msg)
             or _SHOW_DISCORD_CONFIG_RE.match(msg)
             or _SHOW_SLACK_CONFIG_RE.match(msg)
+            or _SHOW_VIBE_CONFIG_RE.match(msg)
         )
         if not matched:
             continue
@@ -1312,6 +1370,32 @@ def _channel_config_skill_from_user_message(user_msg, max_send_chars):
                 f"channel_id={cfg.get('channel_id', '')} "
                 f"bot_token_set={bool(cfg.get('bot_token_set', False))} "
                 f"connected={bool(cfg.get('connected', False))}"
+            )
+            replies.append(_shorten_text(reply.strip(), max_send_chars))
+        elif _SHOW_VIBE_CONFIG_RE.match(msg):
+            vibe_backend = _load_vibe_voice_backend()
+            cfg = {}
+            if vibe_backend is not None:
+                try:
+                    if hasattr(vibe_backend, "get_config"):
+                        cfg = vibe_backend.get_config() or {}
+                except Exception:
+                    cfg = {}
+            if not cfg:
+                cfg = {
+                    "host": "",
+                    "port": "",
+                    "default_user": "",
+                    "connected": False,
+                    "client_count": 0,
+                }
+            reply = (
+                "Vibe-voice config: "
+                f"host={cfg.get('host', '')} "
+                f"port={cfg.get('port', '')} "
+                f"default_user={cfg.get('default_user', '')} "
+                f"connected={bool(cfg.get('connected', False))} "
+                f"clients={cfg.get('client_count', 0)}"
             )
             replies.append(_shorten_text(reply.strip(), max_send_chars))
         if len(replies) >= 3:
@@ -1760,6 +1844,26 @@ def _fallback_policy_actor(channel):
             nick = str((cfg or {}).get("nick") or "").strip()
             if nick:
                 return nick
+    if commchannel == "vibe-voice":
+        vibe_backend = _load_vibe_voice_backend()
+        cfg = {}
+        if vibe_backend is not None and hasattr(vibe_backend, "get_config"):
+            try:
+                cfg = vibe_backend.get_config() or {}
+            except Exception:
+                cfg = {}
+        user = str(
+            (cfg or {}).get("default_user")
+            or os.getenv("VIBE_VOICE_DEFAULT_USER", "")
+            or getattr(vibe_backend, "_default_user", "")
+            or "vibe-agent"
+        ).strip()
+        if not user:
+            user = "vibe-agent"
+        user = re.sub(r"\s+", "-", user.lower())
+        user = re.sub(r"[^a-z0-9._-]", "", user)
+        if user:
+            return user
     return ""
 
 
@@ -2328,6 +2432,8 @@ def _dispatch_to_channel(channel, msg, reply_channel=""):
         backend = _load_discord_backend()
     elif target == "slack":
         backend = _load_slack_backend()
+    elif target == "vibe-voice":
+        backend = _load_vibe_voice_backend()
     else:
         backend = None
     if backend is None:

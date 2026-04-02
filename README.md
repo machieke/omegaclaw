@@ -65,7 +65,10 @@ Security-focused defaults now included:
 - `security_opt: [no-new-privileges:true]`
 - `read_only: true` with `tmpfs` mounts
 - Persistent writable mount only for `./memory`
-- User-defined bridge network (`appnet`) without published ports by default
+- User-defined bridge network (`appnet`)
+- Published ports for vibe voice mode:
+  - `8012` (MeTTaClaw `vibe-voice` websocket)
+  - `5173` (React frontend)
 
 Default local-LLM wiring:
 - `ollama` sidecar service is started in the same Compose project
@@ -75,6 +78,17 @@ Default local-LLM wiring:
 - `OLLAMA_AUTO_PULL=true` (auto-pulls missing local models)
 - If your host UID/GID is not `1000:1000`, set:
   `METTACLAW_UID=$(id -u) METTACLAW_GID=$(id -g) docker compose up --build`
+
+Vibe voice channel + React frontend:
+- Set `METTACLAW_COMMCHANNEL=vibe-voice` in `.env` (or export it in shell).
+- Keep `VIBE_VOICE_ENABLED=true` (default in `.env.example`) so websocket server starts.
+- Run `docker compose up --build`.
+- Open `http://localhost:5173`.
+- Click `Connect`, then `Start Voice`.
+- Voice input uses browser speech-recognition and assistant TTS uses browser speech-synthesis.
+- WebSocket endpoint is `ws://localhost:8012/ws/vibe` by default.
+- If `METTACLAW_AUTH_REQUIRED=true`, first send `auth <startup-secret>` from the UI (the secret is printed in `docker compose logs mettaclaw`).
+- Non-Docker runs need `fastapi` and `uvicorn` installed for the `vibe-voice` websocket server.
 
 Capability policy enforcement:
 - Capabilities register into a shared policy interface at startup.

@@ -46,7 +46,9 @@ RUN python3 -m pip install --no-cache-dir --break-system-packages \
       janus-swi \
       openai \
       chromadb \
-      httpx
+      httpx \
+      fastapi \
+      "uvicorn[standard]"
 
 FROM ${SWIPL_IMAGE} AS runtime
 

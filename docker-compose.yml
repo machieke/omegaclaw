@@ -73,6 +73,10 @@ services:
       DISCORD_CHANNEL_ID: ${DISCORD_CHANNEL_ID:-}
       SLACK_BOT_TOKEN: ${SLACK_BOT_TOKEN:-}
       SLACK_CHANNEL_ID: ${SLACK_CHANNEL_ID:-}
+      VIBE_VOICE_HOST: ${VIBE_VOICE_HOST:-0.0.0.0}
+      VIBE_VOICE_PORT: ${VIBE_VOICE_PORT:-8012}
+      VIBE_VOICE_DEFAULT_USER: ${VIBE_VOICE_DEFAULT_USER:-vibe-user}
+      VIBE_VOICE_ENABLED: ${VIBE_VOICE_ENABLED:-true}
       METTACLAW_LLM_MODE: ${METTACLAW_LLM_MODE:-fast}
       METTACLAW_ASYNC_DISPATCH: ${METTACLAW_ASYNC_DISPATCH:-true}
       METTACLAW_ASYNC_DISPATCH_WORKERS: ${METTACLAW_ASYNC_DISPATCH_WORKERS:-4}
@@ -99,6 +103,22 @@ services:
       - /var/tmp:size=64m,mode=1777
     volumes:
       - ./memory:/PeTTa/repos/mettaclaw/memory:rw
+    ports:
+      - "${VIBE_VOICE_PORT:-8012}:${VIBE_VOICE_PORT:-8012}"
+    restart: unless-stopped
+    init: true
+    networks:
+      - appnet
+
+  vibe-voice-frontend:
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+    image: mettaclaw-vibe-voice-frontend:latest
+    depends_on:
+      - mettaclaw
+    ports:
+      - "${VIBE_VOICE_FRONTEND_PORT:-5173}:80"
     restart: unless-stopped
     init: true
     networks:
