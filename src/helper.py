@@ -32,6 +32,14 @@ except Exception:
         sys.path.append(here)
     import capability_policy
 
+try:
+    import personas
+except Exception:
+    here = os.path.dirname(__file__)
+    if here and here not in sys.path:
+        sys.path.append(here)
+    import personas
+
 _ENSURED_MODELS = set()
 _PREWARMED_MODELS = set()
 _OLLAMA_CLIENT = None
@@ -44,10 +52,6 @@ _SKILL_START_RE = re.compile(
 )
 _SEND_STR_RE = re.compile(r'(\(\s*send\s+")((?:\\.|[^"\\])*)(")', re.DOTALL)
 _QUERY_ONLY_RE = re.compile(r'^\(\(\s*query\s+"((?:\\.|[^"\\])*)"\s*\)\)$', re.IGNORECASE)
-_PERSONA_META_RE = re.compile(r'\(persona-meta\s+"((?:\\.|[^"\\])*)"\s+"((?:\\.|[^"\\])*)"\s*\)')
-_PERSONA_SECTION_RE = re.compile(
-    r'\(persona-section\s+"((?:\\.|[^"\\])*)"\s+"((?:\\.|[^"\\])*)"\s+"((?:\\.|[^"\\])*)"\s*\)'
-)
 _META_REPLY_RE = re.compile(
     r"(continuous loop|self-chosen long-term goals|initial memory state|current goal|task context|"
     r"follow the instructions|use send commands to keep people engaged)",
@@ -101,15 +105,6 @@ _SHOW_CURRENT_CHANNEL_RE = re.compile(
 )
 _USE_CHANNEL_RE = re.compile(
     r"^\s*use\s+(irc|mattermost|telegram|discord|slack|vibe(?:[-_]?voice)?|voice)\s+channel\s*\??\s*$",
-    re.IGNORECASE,
-)
-_PERSONA_LIST_RE = re.compile(r"^\s*(?:persona\s+list|list\s+personas?)\s*\??\s*$", re.IGNORECASE)
-_PERSONA_CURRENT_RE = re.compile(
-    r"^\s*(?:persona\s+current|current\s+persona|show\s+current\s+persona)\s*\??\s*$",
-    re.IGNORECASE,
-)
-_PERSONA_USE_RE = re.compile(
-    r"^\s*(?:persona\s+use|use\s+persona)\s+([a-z0-9._-]+)\s*\??\s*$",
     re.IGNORECASE,
 )
 _POLICY_SHOW_RE = re.compile(r"^\s*policy\s+show\s*\??\s*$", re.IGNORECASE)
@@ -178,9 +173,6 @@ _LAST_IDLE_QUERY_COUNT = 0
 _CAPABILITY_POLICY_LOCK = threading.Lock()
 _CAPABILITY_POLICY_READY = False
 _CAPABILITY_POLICY_ENGINE = None
-_PERSONA_LOCK = threading.Lock()
-_PERSONA_CACHE = {}
-_PERSONA_SECTION_ORDER = ("context", "role", "methodology", "rules", "output")
 
 
 def _balanced_parentheses(text):
@@ -379,224 +371,27 @@ def _project_root_dir():
 
 
 def _normalize_persona_id(value):
-    text = str(value or "").strip().lower()
-    text = re.sub(r"\s+", "-", text)
-    text = re.sub(r"[^a-z0-9._-]", "", text)
-    return text
-
-
-def _persona_enabled():
-    raw = str(os.getenv("METTACLAW_PERSONA_ENABLED", "true") or "").strip().lower()
-    return raw not in {"0", "false", "no", "off"}
-
-
-def _decode_escaped_literal(raw):
-    token = str(raw or "")
-    try:
-        return json.loads(f'"{token}"')
-    except Exception:
-        return token.replace("\\n", "\n").replace('\\"', '"').replace("\\\\", "\\")
-
-
-def _resolve_persona_path(persona_id=""):
-    pid = _normalize_persona_id(persona_id)
-    if not pid:
-        pid = _normalize_persona_id(os.getenv("METTACLAW_PERSONA_ID", "system-thinking-strategist"))
-    if not pid:
-        pid = "system-thinking-strategist"
-    configured = str(os.getenv("METTACLAW_PERSONA_PATH", "") or "").strip()
-    if configured:
-        if "{persona_id}" in configured:
-            configured = configured.replace("{persona_id}", pid)
-        path = configured
-    else:
-        path = os.path.join(_project_root_dir(), "personas", f"{pid}.metta")
-    if not os.path.isabs(path):
-        path = os.path.abspath(os.path.join(_project_root_dir(), path))
-    return pid, path
+    return personas.normalize_persona_id(value)
 
 
 def _load_persona_spec(persona_id=""):
-    requested_id, path = _resolve_persona_path(persona_id)
-    try:
-        mtime = float(os.path.getmtime(path))
-    except Exception:
-        return {}
-    with _PERSONA_LOCK:
-        cached = _PERSONA_CACHE.get(path)
-        if isinstance(cached, dict) and float(cached.get("mtime", 0.0)) == mtime:
-            spec = cached.get("spec") or {}
-            if isinstance(spec, dict):
-                if not requested_id or str(spec.get("id") or "").strip().lower() == requested_id:
-                    return {
-                        "id": str(spec.get("id") or "").strip(),
-                        "title": str(spec.get("title") or "").strip(),
-                        "sections": dict(spec.get("sections") or {}),
-                    }
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            text = f.read()
-    except Exception:
-        return {}
-
-    spec = {
-        "id": str(requested_id or "").strip(),
-        "title": "",
-        "sections": {},
-    }
-    for match in _PERSONA_META_RE.finditer(text):
-        meta_id = _normalize_persona_id(_decode_escaped_literal(match.group(1)))
-        title = str(_decode_escaped_literal(match.group(2)) or "").strip()
-        if not meta_id:
-            continue
-        if requested_id and meta_id != requested_id:
-            continue
-        spec["id"] = meta_id
-        if title:
-            spec["title"] = title
-        break
-
-    for match in _PERSONA_SECTION_RE.finditer(text):
-        entry_id = _normalize_persona_id(_decode_escaped_literal(match.group(1)))
-        key = str(_decode_escaped_literal(match.group(2)) or "").strip().lower()
-        value = str(_decode_escaped_literal(match.group(3)) or "").strip()
-        if not entry_id or not key or not value:
-            continue
-        if requested_id and entry_id != requested_id:
-            continue
-        if spec.get("id") and entry_id != spec["id"]:
-            continue
-        if not spec.get("id"):
-            spec["id"] = entry_id
-        spec["sections"][key] = value
-
-    if not spec["sections"]:
-        return {}
-    if not spec.get("id"):
-        spec["id"] = requested_id
-    if not spec["title"]:
-        spec["title"] = spec["id"].replace("-", " ").strip().title()
-
-    out = {
-        "id": str(spec.get("id") or "").strip(),
-        "title": str(spec.get("title") or "").strip(),
-        "sections": dict(spec.get("sections") or {}),
-    }
-    with _PERSONA_LOCK:
-        _PERSONA_CACHE[path] = {
-            "mtime": mtime,
-            "spec": out,
-        }
-    return out
-
-
-def _persona_section_names():
-    raw = str(os.getenv("METTACLAW_PERSONA_SECTIONS", "") or "").strip().lower()
-    if not raw:
-        return list(_PERSONA_SECTION_ORDER)
-    names = []
-    for item in raw.split(","):
-        key = str(item or "").strip().lower()
-        if not key:
-            continue
-        if key not in names:
-            names.append(key)
-    return names if names else list(_PERSONA_SECTION_ORDER)
+    return personas.load_persona_spec(persona_id, project_root_dir=_project_root_dir())
 
 
 def _active_persona_id():
-    pid = _normalize_persona_id(os.getenv("METTACLAW_PERSONA_ID", "system-thinking-strategist"))
-    return pid or "system-thinking-strategist"
+    return personas.active_persona_id()
 
 
 def _available_persona_ids():
-    root = os.path.join(_project_root_dir(), "personas")
-    ids = []
-    try:
-        files = sorted(os.listdir(root))
-    except Exception:
-        files = []
-    for name in files:
-        if not str(name).lower().endswith(".metta"):
-            continue
-        stem = _normalize_persona_id(os.path.splitext(name)[0])
-        if stem and stem not in ids:
-            ids.append(stem)
-        spec = _load_persona_spec(stem)
-        sid = _normalize_persona_id((spec or {}).get("id"))
-        if sid and sid not in ids:
-            ids.append(sid)
-    active = _active_persona_id()
-    if active and active not in ids:
-        ids.append(active)
-    return ids
+    return personas.available_persona_ids(project_root_dir=_project_root_dir())
 
 
 def _switch_persona(persona_id):
-    target = _normalize_persona_id(persona_id)
-    if not target:
-        return False, ""
-    spec = _load_persona_spec(target)
-    if not spec:
-        return False, ""
-    resolved = _normalize_persona_id(spec.get("id")) or target
-    os.environ["METTACLAW_PERSONA_ID"] = resolved
-    return True, resolved
+    return personas.switch_persona(persona_id, project_root_dir=_project_root_dir())
 
 
 def build_system_prompt(base_prompt=""):
-    base = str(base_prompt or "").strip()
-    if not _persona_enabled():
-        return base
-
-    requested_id = _normalize_persona_id(os.getenv("METTACLAW_PERSONA_ID", "system-thinking-strategist"))
-    spec = _load_persona_spec(requested_id)
-    if not spec:
-        return base
-
-    persona_id = str(spec.get("id") or requested_id or "").strip()
-    title = str(spec.get("title") or "").strip()
-    sections = dict(spec.get("sections") or {})
-    if not sections:
-        return base
-
-    segments = []
-    label = ""
-    if title and persona_id:
-        label = f"{title} ({persona_id})"
-    elif title:
-        label = title
-    elif persona_id:
-        label = persona_id
-    if label:
-        segments.append(f"PERSONA: {label}")
-
-    for key in _persona_section_names():
-        value = str(sections.get(key) or "").strip()
-        if not value:
-            continue
-        tag = re.sub(r"[^a-z0-9_-]", "", key.replace(" ", "-").lower()) or "section"
-        segments.append(f"<persona-{tag}>\n{value}\n</persona-{tag}>")
-
-    max_chars_raw = str(os.getenv("METTACLAW_PERSONA_MAX_CHARS", "0") or "").strip()
-    try:
-        max_chars = int(max_chars_raw)
-    except Exception:
-        max_chars = 0
-
-    selected = []
-    for segment in segments:
-        candidate = "\n".join(selected + [segment]).strip()
-        if max_chars > 0 and len(candidate) > max_chars:
-            break
-        selected.append(segment)
-
-    overlay = "\n".join(selected).strip()
-    if not overlay:
-        return base
-    if not base:
-        return overlay
-    return f"{base}\n\n{overlay}"
+    return personas.build_system_prompt(base_prompt, project_root_dir=_project_root_dir())
 
 
 def _decode_special_tokens(text):
@@ -1662,81 +1457,19 @@ def _channel_config_skill_from_user_message(user_msg, max_send_chars):
 
 
 def _persona_control_skill_from_user_message(user_msg, max_send_chars):
-    replies = []
-    for part in _extract_user_parts(user_msg):
-        sender, body = _split_sender_and_text(part)
-        actor = str(sender or "").strip() or "unknown"
-        commchannel = _get_active_commchannel()
-        msg = _decode_special_tokens(body).strip()
-        if not msg:
-            continue
-        if _PERSONA_LIST_RE.match(msg):
-            decision = _policy_decide_for_actor("list-personas", actor, commchannel, target=msg)
-            if not decision.allowed:
-                replies.append(_policy_denied_reply(decision, max_send_chars, actor=actor))
-                if len(replies) >= 3:
-                    break
-                continue
-            names = _available_persona_ids()
-            current = _active_persona_id()
-            if names:
-                reply = f"Available personas: {', '.join(names)}. Current persona: {current}."
-            else:
-                reply = f"No persona files found. Current persona: {current}."
-            replies.append(_shorten_text(reply, max_send_chars))
-            if len(replies) >= 3:
-                break
-            continue
-        if _PERSONA_CURRENT_RE.match(msg):
-            decision = _policy_decide_for_actor("current-persona", actor, commchannel, target=msg)
-            if not decision.allowed:
-                replies.append(_policy_denied_reply(decision, max_send_chars, actor=actor))
-                if len(replies) >= 3:
-                    break
-                continue
-            current = _active_persona_id()
-            spec = _load_persona_spec(current)
-            title = str((spec or {}).get("title") or "").strip()
-            if title:
-                reply = f"Current persona is {current} ({title})."
-            else:
-                reply = f"Current persona is {current}."
-            replies.append(_shorten_text(reply, max_send_chars))
-            if len(replies) >= 3:
-                break
-            continue
-        use_match = _PERSONA_USE_RE.match(msg)
-        if use_match is None:
-            continue
-        decision = _policy_decide_for_actor("use-persona", actor, commchannel, target=msg)
-        if not decision.allowed:
-            replies.append(_policy_denied_reply(decision, max_send_chars, actor=actor))
-            if len(replies) >= 3:
-                break
-            continue
-        target = _normalize_persona_id(use_match.group(1))
-        ok, resolved = _switch_persona(target)
-        if ok and resolved:
-            spec = _load_persona_spec(resolved)
-            title = str((spec or {}).get("title") or "").strip()
-            if title:
-                reply = f"Switched persona to {resolved} ({title})."
-            else:
-                reply = f"Switched persona to {resolved}."
-            replies.append(_shorten_text(reply, max_send_chars))
-        else:
-            names = _available_persona_ids()
-            if names:
-                reply = f"Persona '{target}' not found. Available: {', '.join(names)}."
-            else:
-                reply = f"Persona '{target}' not found."
-            replies.append(_shorten_text(reply, max_send_chars))
-        if len(replies) >= 3:
-            break
-    if not replies:
-        return None
-    cmds = " ".join(f"(send {_json_quote(reply)})" for reply in replies[:3])
-    return f"({cmds})"
+    return personas.persona_control_skill_from_user_message(
+        user_msg=user_msg,
+        max_send_chars=max_send_chars,
+        extract_user_parts_fn=_extract_user_parts,
+        split_sender_and_text_fn=_split_sender_and_text,
+        get_active_commchannel_fn=_get_active_commchannel,
+        decode_special_tokens_fn=_decode_special_tokens,
+        policy_decide_for_actor_fn=_policy_decide_for_actor,
+        policy_denied_reply_fn=_policy_denied_reply,
+        shorten_text_fn=_shorten_text,
+        json_quote_fn=_json_quote,
+        project_root_dir=_project_root_dir(),
+    )
 
 
 def _search_items(raw):
