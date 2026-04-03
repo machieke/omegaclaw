@@ -76,6 +76,9 @@ Default local-LLM wiring:
 - `OLLAMA_MODEL=llama3.2:1b`
 - `OLLAMA_EMBED_MODEL=nomic-embed-text`
 - `OLLAMA_AUTO_PULL=true` (auto-pulls missing local models)
+- Alternative provider: set `METTACLAW_LLM_PROVIDER=codex` to run chat via the `codex` CLI.
+  - Config knobs: `CODEX_MODEL` (default `gpt-5.4`), `CODEX_MODEL_REASONING_EFFORT` (default `xhigh`), `CODEX_TIMEOUT_S` (default `600`).
+  - The runtime command is `codex e --model <model> -c model_reasoning_effort=<effort> --ephemeral --skip-git-repo-check "$PROMPT" 2>/dev/null | tail -n 1`.
 - If your host UID/GID is not `1000:1000`, set:
   `METTACLAW_UID=$(id -u) METTACLAW_GID=$(id -g) docker compose up --build`
 

@@ -2,6 +2,7 @@
 
 # For maximum integrity, set this to an immutable digest in CI/CD.
 ARG SWIPL_IMAGE=docker.io/library/swipl:9.2.4
+ARG CODEX_CLI_VERSION=0.116.0
 
 FROM ${SWIPL_IMAGE} AS builder
 
@@ -61,11 +62,14 @@ RUN apt-get update \
  && apt-get install -y --no-install-recommends \
       ca-certificates \
       python3 \
+      nodejs \
+      npm \
       libopenblas-dev \
       libblas-dev \
       liblapack-dev \
       gfortran \
       libgflags-dev \
+ && npm install -g "@openai/codex@${CODEX_CLI_VERSION}" \
  && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /PeTTa

@@ -1,6 +1,8 @@
 import json
 import os
 import re
+import shlex
+import subprocess
 import sys
 import threading
 import time
@@ -899,8 +901,14 @@ def _resolve_requested_model(requested, names):
 
 
 def _active_chat_model_default(model_hint=""):
-    env_model = str(os.getenv("OLLAMA_MODEL", "") or "").strip()
     hint = str(model_hint or "").strip()
+    if _llm_provider() == "codex":
+        hint_lower = hint.lower()
+        if hint_lower == "codex" or hint_lower.startswith("codex:"):
+            return hint
+        configured = str(os.getenv("CODEX_MODEL", "gpt-5.4") or "").strip()
+        return configured or "gpt-5.4"
+    env_model = str(os.getenv("OLLAMA_MODEL", "") or "").strip()
     return env_model or hint or "llama3.1:8b"
 
 
@@ -1344,6 +1352,12 @@ def _model_control_skill_from_user_message(user_msg, max_send_chars):
                     break
                 continue
             requested = use_match.group(1).strip().strip('"').strip("'").rstrip(".!?")
+            if _select_llm_provider(requested) == "codex":
+                chosen = requested if requested else "codex"
+                _set_active_chat_model(chosen)
+                model_name = _codex_model_name(chosen)
+                replies.append(_shorten_text(f"Using Codex provider model {model_name}.", max_send_chars))
+                continue
             if not names:
                 names = _available_model_names()
             resolved = _resolve_requested_model(requested, names)
@@ -2959,6 +2973,86 @@ def _ollama_read_timeout_s():
     return max(0.1, _float_env("OLLAMA_READ_TIMEOUT_S", _ollama_timeout_s()))
 
 
+def _llm_provider():
+    text = str(os.getenv("METTACLAW_LLM_PROVIDER", "") or "").strip().lower()
+    if text in {"ollama", "codex"}:
+        return text
+    return ""
+
+
+def _select_llm_provider(model_name=""):
+    forced = _llm_provider()
+    if forced:
+        return forced
+    model_text = str(model_name or "").strip().lower()
+    if model_text == "codex" or model_text.startswith("codex:"):
+        return "codex"
+    return "ollama"
+
+
+def _codex_model_name(model_name=""):
+    raw = str(model_name or "").strip()
+    lower = raw.lower()
+    if lower.startswith("codex:"):
+        raw = raw.split(":", 1)[1].strip()
+        lower = raw.lower()
+    if not raw or lower == "codex":
+        raw = str(os.getenv("CODEX_MODEL", "gpt-5.4") or "").strip()
+    return raw or "gpt-5.4"
+
+
+def _codex_reasoning_effort(effort=""):
+    configured = str(os.getenv("CODEX_MODEL_REASONING_EFFORT", "xhigh") or "").strip().lower()
+    if configured in {"low", "medium", "high", "xhigh"}:
+        return configured
+    effort_text = str(effort or "").strip().lower()
+    if effort_text in {"low", "medium", "high", "xhigh"}:
+        return effort_text
+    return "xhigh"
+
+
+def _codex_timeout_s():
+    return max(1.0, _float_env("CODEX_TIMEOUT_S", _ollama_timeout_s()))
+
+
+def _codex_chat(prompt, model_name="", effort=""):
+    model = _codex_model_name(model_name)
+    reasoning = _codex_reasoning_effort(effort)
+    env = os.environ.copy()
+    env["PROMPT"] = str(prompt or "")
+    cmd = (
+        "set -o pipefail; "
+        f"codex e --model {shlex.quote(model)} "
+        f"-c model_reasoning_effort={shlex.quote(reasoning)} "
+        "--ephemeral --skip-git-repo-check \"$PROMPT\" 2>/dev/null | tail -n 1"
+    )
+    timeout = _codex_timeout_s()
+    try:
+        result = subprocess.run(
+            ["bash", "-lc", cmd],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(f"Codex CLI timed out after {timeout:.0f}s.") from exc
+    except Exception as exc:
+        raise RuntimeError(f"Codex CLI execution failed: {exc}") from exc
+
+    output = str(result.stdout or "").strip()
+    if output:
+        lines = [line.strip() for line in output.splitlines() if line.strip()]
+        if lines:
+            return lines[-1]
+    if int(result.returncode) == 127:
+        raise RuntimeError("Codex CLI command was not found in PATH.")
+    if int(result.returncode) != 0:
+        raise RuntimeError(f"Codex CLI exited with status {result.returncode} and no output.")
+    raise RuntimeError("Codex CLI returned no output.")
+
+
 def _ollama_chat_stream_enabled():
     return _is_true(os.getenv("OLLAMA_CHAT_STREAM", "true"))
 
@@ -3313,6 +3407,13 @@ def generate_skill_candidate(model, prompt, max_tokens, effort, user_msg=""):
 def ollama_chat(model, prompt, max_tokens, effort):
     _start_background_prewarm()
     chosen_model = _get_active_chat_model(model)
+    provider = _select_llm_provider(chosen_model)
+    if provider == "codex":
+        print(f"[helper] [codex_chat] [prompt] {str(prompt)}", flush=True)
+        msg = _codex_chat(prompt, model_name=chosen_model, effort=effort)
+        print(f"[helper] [codex_chat] [msg] {msg}", flush=True)
+        return msg
+
     _ensure_ollama_model(chosen_model)
     _prewarm_chat_model(chosen_model)
     think = _ollama_think(effort)
