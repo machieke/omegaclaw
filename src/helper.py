@@ -1984,6 +1984,14 @@ def _extract_send_payloads(skill_text):
     return payloads
 
 
+def _extract_first_send_payload(skill_text):
+    for payload in _extract_send_payloads(skill_text):
+        text = " ".join(str(payload or "").split()).strip()
+        if text:
+            return text
+    return ""
+
+
 def _is_meta_skill_output(skill_text):
     payloads = _extract_send_payloads(skill_text)
     for payload in payloads:
@@ -2065,6 +2073,17 @@ def _direct_answer_from_ollama(user_text, max_send_chars):
         return None
     text = str(raw or "")
     text = text.replace("_newline_", "\n").replace("_apostrophe_", "'").replace("_quote_", '"')
+    stripped = text.lstrip()
+    if stripped.startswith("("):
+        send_payload = _extract_first_send_payload(text)
+        if not send_payload:
+            repaired = _repair_partial_skill_output(text)
+            if repaired is not None:
+                send_payload = _extract_first_send_payload(repaired)
+        if send_payload:
+            text = send_payload
+        else:
+            return None
     if detail_mode:
         if long_form_mode:
             text = _trim_incomplete_tail(_shorten_text(text, max_send_chars))
@@ -2929,6 +2948,11 @@ def normalize_skill_output(s, user_msg="", msg_new=False, max_send_chars=None, s
         return _enforce_capability_policy(direct, user_msg=user_msg, max_send_chars=max_send_chars)
 
     if not text:
+        return "()"
+
+    # Never dump malformed command syntax to users; if we got here after
+    # repair/direct-fallback attempts, skip this iteration instead.
+    if text.lstrip().startswith("("):
         return "()"
 
     plain = text.replace("\r\n", "\n").replace("\r", "\n")
