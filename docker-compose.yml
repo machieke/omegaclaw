@@ -23,6 +23,7 @@ services:
       ollama:
         condition: service_healthy
     environment:
+      HOME: /home/codex
       OPENAI_API_KEY: ${OPENAI_API_KEY:-ollama-local}
       OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://ollama:11434}
       OLLAMA_MODEL: ${OLLAMA_MODEL:-qwen3-coder-next:latest}
@@ -110,6 +111,7 @@ services:
       - /var/tmp:size=64m,mode=1777
     volumes:
       - ./memory:/PeTTa/repos/mettaclaw/memory:rw
+      - ${HOME}/.codex:/home/codex/.codex:rw
     ports:
       - "${VIBE_VOICE_PORT:-8012}:${VIBE_VOICE_PORT:-8012}"
     restart: unless-stopped
