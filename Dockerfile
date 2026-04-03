@@ -52,6 +52,7 @@ RUN python3 -m pip install --no-cache-dir --break-system-packages \
       "uvicorn[standard]"
 
 FROM ${SWIPL_IMAGE} AS runtime
+ARG CODEX_CLI_VERSION=0.116.0
 
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 ENV DEBIAN_FRONTEND=noninteractive \
