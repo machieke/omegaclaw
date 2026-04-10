@@ -20,6 +20,11 @@ ANTHROPIC_CLIENT = _init_openai_client(
     base_url="https://api.anthropic.com/v1/"
 )
 
+OLLAMA_CLIENT = _init_openai_client(
+    var_name="OLLAMA_API_KEY",
+    base_url=os.environ.get("OLLAMA_BASE_URL", "https://ollama.com/v1/")
+)
+
 def _clean(text):
     return text.replace("_quote_", '"').replace("_apostrophe_", "'")
 
@@ -112,4 +117,13 @@ def useClaude(content):
         client=ANTHROPIC_CLIENT,
         model="claude-opus-4-6",
         content=content
+    )
+
+
+def useOllama(model, content, max_tokens=6000):
+    return _chat(
+        client=OLLAMA_CLIENT,
+        model=model,
+        content=content,
+        max_tokens=max_tokens
     )

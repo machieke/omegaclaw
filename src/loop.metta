@@ -11,8 +11,8 @@
    (progn (configure maxNewInputLoops 50) ;20
           (configure maxWakeLoops 1)
           (configure sleepInterval 1) ;10
-          (configure LLM gpt-5.4)
-          (configure provider Anthropic) ;OpenAI or ASICloud
+          (configure LLM glm-5.1)
+          (configure provider OllamaCloud) ;OpenAI, Anthropic, OllamaCloud, or ASICloud
           (configure maxOutputToken 6000)
           (configure reasoningMode medium)
           (configure wakeupInterval 600) ;600=10 minutes
@@ -57,7 +57,9 @@
                                                    (useGPT (LLM) (maxOutputToken) (reasoningMode) $send)
                                                    (if (== (provider) Anthropic)
                                                        (py-call (lib_llm_ext.useClaude $send))
-                                                       (py-call (lib_llm_ext.useMiniMax $send)))))
+                                                       (if (== (provider) OllamaCloud)
+                                                           (py-call (lib_llm_ext.useOllama (LLM) $send (maxOutputToken)))
+                                                           (py-call (lib_llm_ext.useMiniMax $send))))))
                                        ($resp (py-call (helper.balance_parentheses $respi)))
                                        ($response (if (== "(" (first_char $resp)) $resp (progn (println! $resp) (repr (REMEMBER:OUTPUT_NOTHING_ELSE_THAN: ((skill arg) ...))))))
                                        ($sexpr (catch (sread $response)))

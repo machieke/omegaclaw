@@ -63,7 +63,7 @@ OmegaClaw can be installed and started with:
 ```bash
 curl -fsSL https://raw.githubusercontent.com/asi-alliance/OmegaClaw-Core/refs/heads/main/scripts/omegaclaw_setup.sh | bash -s -- singularitynet/omegaclaw:latest
 ```
-When prompted, enter your OpenAI API key and a unique IRC channel name, then interact with your OmegaClaw at [webchat.quakenet.org](https://webchat.quakenet.org) or any IRC portal. 
+When prompted, enter your LLM API key (for Ollama Cloud, use your `OLLAMA_API_KEY`) and a unique IRC channel name, then interact with your OmegaClaw at [webchat.quakenet.org](https://webchat.quakenet.org) or any IRC portal. 
 
 ### Channel authentication
 

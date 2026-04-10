@@ -136,6 +136,7 @@ docker run -d -it \
   --tmpfs /run:size=16m,mode=755 \
   --tmpfs /var/tmp:size=64m,mode=1777 \
   -e ANTHROPIC_API_KEY="$token" \
+  -e OLLAMA_API_KEY="$token" \
   -e OMEGACLAW_AUTH_SECRET="$auth_secret" \
   "$image" \
   "$channel"
