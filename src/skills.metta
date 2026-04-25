@@ -16,6 +16,10 @@
     "- Get technical analysis for a stock ticker using the Technical Analysis Agent: technical-analysis ticker"
     ;CODE EXECUTION:
     "- Execute MeTTa expression: metta sexpression"
+    "- Execute bounded symbolic attention scheduler (JSON payload): bounded-metta json_payload"
+    "- Execute bounded scheduler + run selected NAL/PLN calls: bounded-metta-exec json_payload"
+    "- Reset bounded attention state: attention-reset"
+    "- Inspect bounded attention state/metrics: attention-state"
     "Example to invoke Non-Axiomatic Logic via MeTTa: "
     "metta (|- ((--> (× sam garfield) friend) (stv 1.0 0.9))"
     "          ((--> garfield animal) (stv 1.0 0.9)))"
@@ -26,7 +30,10 @@
     "You can also use PLN:"
     "metta (|~ ((Implication (Inheritance $1 (IntSet Feathered))"
     "           (Inheritance $1 Bird)) (stv 1.0 0.9))"
-    "          ((Inheritance Pingu (IntSet Feathered)) (stv 1.0 0.9)))"))
+    "          ((Inheritance Pingu (IntSet Feathered)) (stv 1.0 0.9)))"
+    "Example bounded payload (JSON):"
+    "bounded-metta {\"engine\":\"nal\",\"premises\":[\"((--> sam human) (stv 1.0 0.9))\",\"((--> human mortal) (stv 1.0 0.9))\"],\"budgets\":{\"inference_budget\":2,\"revision_budget\":1}}"
+    "bounded-metta-exec {\"engine\":\"nal\",\"premises\":[\"((--> sam human) (stv 1.0 0.9))\",\"((--> human mortal) (stv 1.0 0.9))\"],\"budgets\":{\"inference_budget\":2,\"revision_budget\":1}}"))
 
 
 (= (read-file $file)
@@ -59,6 +66,63 @@
 (= (metta $str)
    (let $code (sread $str)
         (repr (swrite (eval $code)))))
+
+(= (bounded-metta $payload)
+   (py-call (attention.bounded_metta_runtime $payload
+                                             (attentionEnabled)
+                                             (attentionCandidateBudget)
+                                             (attentionInferenceBudget)
+                                             (attentionRevisionBudget)
+                                             (attentionTimeBudgetMs)
+                                             (attentionWR)
+                                             (attentionWH)
+                                             (attentionWIG)
+                                             (attentionWCost)
+                                             (attentionBias)
+                                             (attentionEta)
+                                             (attentionDecayLambda)
+                                             (attentionMaxHebbianEdges)
+                                             (attentionHMin)
+                                             (attentionHBase)
+                                             (attentionHMax)
+                                             (attentionKUncertainty)
+                                             (attentionTransportDamping)
+                                             (attentionBeta)
+                                             (attentionMinInferenceQuota)
+                                             (attentionMinRevisionQuota)))
+
+(= (bounded-metta-exec $payload)
+   (let* (($plan (py-call (attention.bounded_metta_eval_plan_runtime $payload
+                                                                     (attentionEnabled)
+                                                                     (attentionCandidateBudget)
+                                                                     (attentionInferenceBudget)
+                                                                     (attentionRevisionBudget)
+                                                                     (attentionTimeBudgetMs)
+                                                                     (attentionWR)
+                                                                     (attentionWH)
+                                                                     (attentionWIG)
+                                                                     (attentionWCost)
+                                                                     (attentionBias)
+                                                                     (attentionEta)
+                                                                     (attentionDecayLambda)
+                                                                     (attentionMaxHebbianEdges)
+                                                                     (attentionHMin)
+                                                                     (attentionHBase)
+                                                                     (attentionHMax)
+                                                                     (attentionKUncertainty)
+                                                                     (attentionTransportDamping)
+                                                                     (attentionBeta)
+                                                                     (attentionMinInferenceQuota)
+                                                                     (attentionMinRevisionQuota)))
+          ($sexpr (catch (sread $plan))))
+         (case $sexpr (((Error $a $b) (repr (swrite $sexpr)))
+                       ($else (repr (swrite (collapse (let $cmd (superpose $sexpr) (eval $cmd)))))))))
+
+(= (attention-reset)
+   (py-call (attention.reset_state)))
+
+(= (attention-state)
+   (py-call (attention.get_state)))
 
 (= (pin $x)
    PIN-SUCCESS)

@@ -23,6 +23,32 @@ This reads a command-line override via `argk` (`name=value` on the MeTTa command
 | `reasoningMode` | `medium` | Reasoning-effort hint passed to the provider. |
 | `wakeupInterval` | 600 (seconds) | How long idle before the next scheduled wake-up. |
 
+### Bounded Attention (`src/loop.metta`, `initLoop`)
+
+| Parameter | Default | Meaning |
+|---|---|---|
+| `attentionEnabled` | `True` | Enables/disables bounded attention skills (`bounded-metta`). |
+| `attentionCandidateBudget` | 256 | Maximum structural candidates generated per cycle. |
+| `attentionInferenceBudget` | 8 | Max items emitted in inference queue. |
+| `attentionRevisionBudget` | 4 | Max items emitted in revision queue. |
+| `attentionTimeBudgetMs` | 50 | Hard time budget for attention scheduling work. |
+| `attentionWR` | 0.40 | Conductance weight for structural relevance `R`. |
+| `attentionWH` | 0.25 | Conductance weight for Hebbian association `H`. |
+| `attentionWIG` | 0.25 | Conductance weight for `IG` signal. |
+| `attentionWCost` | 0.20 | Conductance penalty weight for normalized `Cost`. |
+| `attentionBias` | 0.0 | Conductance additive bias term. |
+| `attentionEta` | 0.05 | Hebbian learning rate. |
+| `attentionDecayLambda` | 0.001 | Hebbian lazy-decay factor. |
+| `attentionMaxHebbianEdges` | 200000 | Hard cap for stored Hebbian edges. |
+| `attentionHMin` | 0.5 | Minimum SPH smoothing radius. |
+| `attentionHBase` | 1.0 | Base SPH smoothing radius. |
+| `attentionHMax` | 3.0 | Maximum SPH smoothing radius. |
+| `attentionKUncertainty` | 1.0 | Uncertainty multiplier for adaptive radius. |
+| `attentionTransportDamping` | 0.15 | SPH transport damping factor. |
+| `attentionBeta` | 4.0 | Contradiction gate slope parameter. |
+| `attentionMinInferenceQuota` | 1 | Starvation guard for minimum inference queue size. |
+| `attentionMinRevisionQuota` | 1 | Starvation guard for minimum revision queue size. |
+
 ## Memory (`src/memory.metta`, `initMemory`)
 
 | Parameter | Default | Meaning |

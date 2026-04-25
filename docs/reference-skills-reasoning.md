@@ -45,9 +45,43 @@ Whatever the inner expression returns. For NAL/PLN calls, this is a conclusion a
 
 ---
 
+## `bounded-metta`
+
+### Signature
+```metta
+(bounded-metta json_payload)
+```
+
+### Purpose
+Run bounded symbolic attention scheduling over a set of premises and return deterministic inference/revision queues under hard budgets.
+
+### Parameters
+- `json_payload` — JSON string with:
+  - `engine`: `"nal"` or `"pln"`
+  - `premises`: list of premise strings, each shaped like `((TERM) (stv f c))`
+  - optional `budgets` / `config` overrides
+
+### Returns
+JSON string containing:
+- `all_candidates` with per-candidate features (`R`, `H`, `IG`, `Cost`, conductance, contradiction, scores)
+- `inference_queue` and `revision_queue` (disjoint, deterministic)
+- `metrics` and any `warnings` (for example budget saturation)
+
+### Example
+```text
+(bounded-metta "{\"engine\":\"nal\",\"premises\":[\"((--> sam human) (stv 1.0 0.9))\",\"((--> human mortal) (stv 1.0 0.9))\",\"((--> sam mortal) (stv 1.0 0.4))\"],\"budgets\":{\"inference_budget\":2,\"revision_budget\":1}}")
+```
+
+### Related control skills
+- `bounded-metta-exec` — plans and executes selected `(|-)` / `(|~)` calls in one step.
+- `attention-reset` — clear Hebbian/metric state.
+- `attention-state` — inspect current attention cycle/state snapshot.
+
+---
+
 ## Engine selection, stopping criteria, action thresholds
 
-These are policy decisions, not part of the `metta` skill's API. See [reference-orchestration.md](./reference-orchestration.md) for the full tables and rationale (pattern → engine mapping, halt conditions, ACT / HYPOTHESIZE / IGNORE tiers).
+These are policy decisions. `metta` executes direct reasoning calls; `bounded-metta` performs compute-bounded candidate prioritization before selecting which calls should run. See [reference-orchestration.md](./reference-orchestration.md) for the full policy tables.
 
 ---
 
